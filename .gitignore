@@ -1,0 +1,32 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Training runtime outputs
+checkpoint/
+logs/
+outputs/
+validation_log/
+swanlab_log/
+swanlog/
+wandb/
+
+# Training/stdout logs
+*.log
+*.out
+slurm-*.out
+train_*.log
+nohup.out
+
+# Generated plots and metrics
+figs/metrics/
+figs/**/*.png
+figs/**/*.csv
+
+# Local environment files
+.env
+.env.*
+*.local

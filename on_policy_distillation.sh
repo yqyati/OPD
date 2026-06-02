@@ -14,6 +14,9 @@
 
 set -x
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$SCRIPT_DIR" || exit 1
+
 # Configure logging when running outside SBATCH.
 if [ -z "$SLURM_JOB_ID" ]; then
     # Create the log directory and file for local runs.
