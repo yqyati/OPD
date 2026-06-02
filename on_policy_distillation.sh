@@ -244,7 +244,7 @@ python3 -m verl.trainer.main_ppo \
     custom_reward_function.name=reward_func \
     trainer.val_before_train=False \
     trainer.log_val_generations=2 \
-    trainer.logger=['console','swanlab'] \
+    trainer.logger=['console','tensorboard'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.validation_data_dir=validation_log/$EXPERIMENT_NAME \

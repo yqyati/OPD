@@ -13,6 +13,9 @@ validation_log/
 swanlab_log/
 swanlog/
 wandb/
+tensorboard_log/
+runs/
+events.out.tfevents.*
 
 # Training/stdout logs
 *.log
