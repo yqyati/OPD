@@ -1,6 +1,5 @@
 import os
 import json
-import random
 import re
 import argparse
 import concurrent.futures
@@ -25,8 +24,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 #                   Global constants / variables                              #
 # --------------------------------------------------------------------------- #
-DATA_DIR = "../data"
-# MODEL_FOLDER = "../../model/Qwen3-1.7B-SFT-DAPO-4B-filtered"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 def extract_max_number(path):
     """Extract all numbers from a path and return the largest one for sorting."""
@@ -35,29 +33,8 @@ def extract_max_number(path):
         return max(int(n) for n in numbers)
     return -1  # If there is no number, keep this entry at the end.
 
-# Collect model paths and sort them by descending numeric suffix.
-try:
-    model_files = os.listdir(MODEL_FOLDER)
-    MODEL_NAMES_CANDIDATES = [os.path.join(MODEL_FOLDER, f) for f in model_files]
-    MODEL_NAMES_CANDIDATES.sort(key=extract_max_number, reverse=True)
-except FileNotFoundError:
-    MODEL_NAMES_CANDIDATES = []
-
-# Active model list.
-MODEL_NAMES = MODEL_NAMES_CANDIDATES
-MODEL_NAMES = ["../../model/Qwen3-4B"]
-
-TASKS = [
-    {"name": "AIME24", "path": f"{DATA_DIR}/AIME24/test.parquet", "N": 16},
-    {"name": "AIME25", "path": f"{DATA_DIR}/AIME25/test.parquet", "N": 16},
-    {"name": "AMC23", "path": f"{DATA_DIR}/AMC23/test.parquet", "N": 16},
-]
-
 PROMPT_TEMPLATE = """{problem} Please reason step by step, and put your final answer within \\boxed{{}}."""
-MAX_TOKENS  = 31744
-TEMPERATURE = 0.7
-TOP_P       = 0.95
-REPLACE     = False
+DEFAULT_TASKS = ["AIME24", "AIME25", "AMC23"]
 
 # --------------------------------------------------------------------------- #
 #                               Helper functions                              #
@@ -101,10 +78,10 @@ def split_rollout_ids(rollout_ids: list[int], num_workers: int):
 def worker_process(args_tuple):
     """
     Each worker runs on a single GPU:
-    args_tuple = (model_name, samples, rollout_id_list, gpu_id, enable_thinking)
+    args_tuple = (model_name, samples, rollout_id_list, gpu_id, enable_thinking, temperature, top_p, max_tokens)
     gpu_id: values such as "0" or "3", used for CUDA_VISIBLE_DEVICES
     """
-    model_name, samples, rollout_id_list, gpu_id, enable_thinking = args_tuple
+    model_name, samples, rollout_id_list, gpu_id, enable_thinking, temperature, top_p, max_tokens = args_tuple
     
     # CUDA_VISIBLE_DEVICES must be set inside the spawned process.
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
@@ -147,9 +124,9 @@ def worker_process(args_tuple):
         
         for rollout_id in rollout_id_list:
             sampling = SamplingParams(
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                max_tokens=MAX_TOKENS,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
                 stop_token_ids=stop_token_ids if stop_token_ids else None,
             )
 
@@ -217,6 +194,41 @@ def worker_process(args_tuple):
 # --------------------------------------------------------------------------- #
 def main():
     parser = argparse.ArgumentParser(description="Generate evaluation rollouts with vLLM.")
+    parser.add_argument(
+        "--model",
+        action="append",
+        required=True,
+        help="Model path to evaluate. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=str(DEFAULT_DATA_DIR),
+        help="Directory containing task folders such as AIME24/test.parquet.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="justrl_eval_outputs",
+        help="Directory where jsonl generation outputs are written.",
+    )
+    parser.add_argument(
+        "--tasks",
+        default=",".join(DEFAULT_TASKS),
+        help="Comma-separated task names, e.g. AIME24,AIME25,AMC23.",
+    )
+    parser.add_argument("--n", type=int, default=16, help="Number of rollouts per problem.")
+    parser.add_argument("--max-tokens", type=int, default=31744, help="Maximum generation tokens.")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature.")
+    parser.add_argument("--top-p", type=float, default=0.95, help="Sampling top_p.")
+    parser.add_argument(
+        "--gpus",
+        default="0,1,2,3",
+        help="Comma-separated GPU ids. One vLLM process is launched per id.",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Regenerate output files even if they already exist.",
+    )
     thinking_group = parser.add_mutually_exclusive_group()
     thinking_group.add_argument(
         "--enable-thinking",
@@ -234,30 +246,38 @@ def main():
     args = parser.parse_args()
 
     # Specify GPU IDs, with one model instance assigned to each GPU.
-    available_gpus = [0, 1, 2, 3, 4, 5, 6, 7]
-    gpu_workers = [str(gpu_id) for gpu_id in available_gpus]
+    gpu_workers = [gpu.strip() for gpu in args.gpus.split(",") if gpu.strip()]
+    if not gpu_workers:
+        raise ValueError("--gpus must contain at least one GPU id.")
     num_workers = len(gpu_workers)
+    data_dir = Path(args.data_dir)
+    output_root = Path(args.output_dir)
+    tasks = [
+        {"name": name.strip(), "path": data_dir / name.strip() / "test.parquet", "N": args.n}
+        for name in args.tasks.split(",")
+        if name.strip()
+    ]
 
     print(f"GPU workers (one model per GPU): {gpu_workers}")
     print(f"apply_chat_template enable_thinking={args.enable_thinking}")
 
-    for model_name in MODEL_NAMES:
+    for model_name in args.model:
         print(f"\n{'='*50}\nStarting evaluation for model: {model_name}\n{'='*50}")
         
-        OUT_DIR = Path(f"justrl_eval_outputs/{model_name.split('/')[-1]}")
+        OUT_DIR = output_root / Path(model_name).name
         OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        for task in TASKS:
+        for task in tasks:
             task_name = task["name"]
             task_path = task["path"]
             N = task["N"]
 
             print(f"Starting evaluation for task: {task_name} (N={N})")
             
-            out_path = OUT_DIR / f"{task_name.lower()}_t{TEMPERATURE}_p{TOP_P}_n{N}-MNT{MAX_TOKENS}.jsonl"
+            out_path = OUT_DIR / f"{task_name.lower()}_t{args.temperature}_p{args.top_p}_n{N}-MNT{args.max_tokens}.jsonl"
 
             # --- Repetition Check ---
-            if not REPLACE and out_path.exists():
+            if not args.replace and out_path.exists():
                 print(f"Result file already exists at '{out_path}'. Skipping.")
                 continue  # Skip to the next task
 
@@ -281,7 +301,16 @@ def main():
             # 3. Launch workers, with each worker using one GPU.
             all_results = []
             args_list = [
-                (model_name, samples, rollout_chunks[i], gpu_workers[i], args.enable_thinking)
+                (
+                    model_name,
+                    samples,
+                    rollout_chunks[i],
+                    gpu_workers[i],
+                    args.enable_thinking,
+                    args.temperature,
+                    args.top_p,
+                    args.max_tokens,
+                )
                 for i in range(num_workers)
             ]
             

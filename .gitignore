@@ -7,6 +7,7 @@ __pycache__/
 
 # Training runtime outputs
 checkpoint/
+merged_models/
 logs/
 outputs/
 validation_log/
