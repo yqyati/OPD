@@ -8,6 +8,10 @@ import gc  # Added for explicit resource cleanup
 import torch  # Added for CUDA cache cleanup
 from pathlib import Path
 
+# This environment usually has CUDA runtime libraries but not nvcc. FlashInfer
+# sampler JIT then fails during vLLM profile_run, so default to PyTorch sampler.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
 import pandas as pd
 from tqdm import tqdm
 from vllm import LLM, SamplingParams
@@ -41,6 +45,7 @@ DEFAULT_TASKS = ["AIME24", "AIME25", "AMC23"]
 # --------------------------------------------------------------------------- #
 def load_samples(filepath: str):
     """Read parquet file and return a list of prompts (no duplication)."""
+    filepath = str(filepath)
     df = pd.read_parquet(filepath)
     if "BRUMO25" in filepath or "CMIMC25" in filepath or "HMMT25" in filepath:
         samples = [

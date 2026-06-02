@@ -15,6 +15,7 @@ swanlab_log/
 swanlog/
 wandb/
 tensorboard_log/
+justrl_eval_outputs/
 runs/
 events.out.tfevents.*
 

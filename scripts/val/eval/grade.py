@@ -34,7 +34,7 @@ Judging the correctness of the candidate's answer:
 """
 
 DEFAULT_VERIFIER_MODEL = "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/CompassVerifier-3B"
-DEFAULT_LENGTH_TOKENIZER = "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B"
+DEFAULT_LENGTH_TOKENIZER = "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-SFT"
 
 # Global variables to be initialized in main.
 vllm_model = None
