@@ -14,6 +14,8 @@
 
 set -x
 
+export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+
 # Configure logging when running outside SBATCH.
 if [ -z "$SLURM_JOB_ID" ]; then
     # Create the log directory and file for local runs.
@@ -51,8 +53,8 @@ export GRPO_OUTCOME_WEIGHT=1.0
 
 # DeepMath-103K
 export MAX_PROMPT_LENGTH=1024
-export MAX_RESP_LENGTH=7168  # TODO: 31744 /15360 / 7168 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=7168 # TODO: 15360 / 7168 / 3072
+export MAX_RESP_LENGTH=4096  # TODO: 31744 /15360 / 7168 / 4096 / 3072 / 5120
+export MAX_VAL_RESP_LENGTH=4096 # TODO: 15360 / 7168 / 4096 / 3072
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # TODO: 1 / 8 / 16 / 32 / 64 (default 64)
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)
