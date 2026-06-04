@@ -25,11 +25,15 @@ events.out.tfevents.*
 slurm-*.out
 train_*.log
 nohup.out
+justrl_eval_outputs_31744/
+justrl_eval_outputs_7168
+
 
 # Generated plots and metrics
 figs/metrics/
 figs/**/*.png
 figs/**/*.csv
+analysis_plots/
 
 # Local environment files
 .env

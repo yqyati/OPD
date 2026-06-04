@@ -7,11 +7,11 @@ cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
 export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-CKPT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/checkpoint/token_reward_direct_DAPO-Math-17k_DeepSeek-R1-Distill-Qwen-1.5B_JustRL-DeepSeek-1.5B_4096-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p-2026-06-03_20-29-58/global_step_180/actor"
-MERGED_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/opd_original_deepseek_justrl_global_step_180_4096"
+CKPT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/checkpoint/token_reward_direct_DAPO-Math-17k-TeacherAligned_DeepSeek-R1-Distill-Qwen-1.5B_JustRL-DeepSeek-1.5B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p-2026-06-04_07-38-38/global_step_279/actor"
+MERGED_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/token_reward_direct_DAPO-Math-17k-TeacherAligned_DeepSeek-R1-Distill-Qwen-1.5B_JustRL-DeepSeek-1.5B_7168-T_1.0-Tch_1.0-n_4-mbs_64-topk_16-topk_strategy_only_stu-rw_student_p-2026-06-04_07-38-38_global_step_279"
 DATA_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data"
 OUTPUT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/justrl_eval_outputs"
-EVAL_DIR="${OUTPUT_DIR}/opd_original_deepseek_justrl_global_step_180_4096"
+EVAL_DIR="${OUTPUT_DIR}/$(basename "${MERGED_DIR}")"
 
 # 1. Merge FSDP checkpoint shards into a HuggingFace-format model.
 python -m verl.model_merger merge \
@@ -26,7 +26,7 @@ python scripts/val/eval/gen_vllm.py \
   --output-dir "${OUTPUT_DIR}" \
   --tasks AIME24,AIME25,AMC23 \
   --n 16 \
-  --max-tokens 4096 \
+  --max-tokens 7168 \
   --temperature 0.7 \
   --top-p 0.95 \
   --gpus 0,1,2,3,4,5,6,7 \
