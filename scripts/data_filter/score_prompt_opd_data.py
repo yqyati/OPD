@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-fracs", default="0.5,0.3", help="Comma-separated top score fractions.")
     parser.add_argument("--tail-fraction", type=float, default=0.7, help="Fraction of later question tokens to score.")
     parser.add_argument("--min-prefix-tokens", type=int, default=8, help="Ignore early target positions.")
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--allow-tokenizer-mismatch", action="store_true")
     return parser.parse_args()
@@ -51,7 +53,9 @@ def get_torch_dtype(name: str) -> torch.dtype:
 def extract_prompt_text(row: pd.Series) -> str:
     if "prompt" in row and row["prompt"] is not None:
         prompt = row["prompt"]
-        if isinstance(prompt, list) and prompt:
+        if hasattr(prompt, "tolist"):
+            prompt = prompt.tolist()
+        if isinstance(prompt, (list, tuple)) and prompt:
             item = prompt[0]
             if isinstance(item, dict) and "content" in item:
                 return str(item["content"]).strip()
@@ -92,6 +96,40 @@ def topk_overlap(student_logits: torch.Tensor, teacher_logits: torch.Tensor, k: 
     return (student_topk.unsqueeze(-1) == teacher_topk.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
 
 
+def build_selected_mask(
+    target_mask: torch.Tensor,
+    tail_fraction: float,
+    min_prefix_tokens: int,
+) -> torch.Tensor:
+    selected_mask = torch.zeros_like(target_mask, dtype=torch.bool)
+    for idx in range(target_mask.size(0)):
+        valid = torch.nonzero(target_mask[idx], as_tuple=False).flatten()
+        if valid.numel() == 0:
+            continue
+        start = max(min_prefix_tokens, int(valid.numel() * (1.0 - tail_fraction)))
+        selected = valid[valid >= start]
+        if selected.numel() == 0:
+            selected = valid
+        selected_mask[idx, selected] = True
+    return selected_mask
+
+
+def selected_token_metrics(
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    selected_mask: torch.Tensor,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    selected_logits = logits[:, :-1, :][selected_mask.to(logits.device)].float()
+    selected_targets = target_ids[selected_mask].to(logits.device)
+    log_probs = F.log_softmax(selected_logits, dim=-1)
+    probs = log_probs.exp()
+    entropy = -(probs * log_probs).sum(dim=-1).cpu()
+    nll = -log_probs.gather(-1, selected_targets.unsqueeze(-1)).squeeze(-1).cpu()
+    topk_ids = torch.topk(selected_logits, k=topk, dim=-1).indices.cpu()
+    return entropy, nll, topk_ids
+
+
 def score_batch(
     texts: list[str],
     tokenizer,
@@ -114,53 +152,47 @@ def score_batch(
     )
     input_ids = encoded["input_ids"]
     attention_mask = encoded["attention_mask"]
-
-    with torch.no_grad():
-        student_logits = student_model(
-            input_ids=input_ids.to(student_device),
-            attention_mask=attention_mask.to(student_device),
-        ).logits[:, :-1].float().cpu()
-        teacher_logits = teacher_model(
-            input_ids=input_ids.to(teacher_device),
-            attention_mask=attention_mask.to(teacher_device),
-        ).logits[:, :-1].float().cpu()
-
     target_ids = input_ids[:, 1:]
     target_mask = attention_mask[:, 1:].bool()
+    selected_mask = build_selected_mask(target_mask, tail_fraction, min_prefix_tokens)
+    sample_indices = torch.nonzero(selected_mask, as_tuple=True)[0]
 
-    student_log_probs = F.log_softmax(student_logits, dim=-1)
-    teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
-    student_probs = student_log_probs.exp()
-    teacher_probs = teacher_log_probs.exp()
+    with torch.no_grad():
+        student_outputs = student_model(
+            input_ids=input_ids.to(student_device),
+            attention_mask=attention_mask.to(student_device),
+        ).logits
+        student_entropy, student_nll, student_topk = selected_token_metrics(
+            student_outputs, target_ids, selected_mask, topk
+        )
+        del student_outputs
 
-    student_entropy = -(student_probs * student_log_probs).sum(dim=-1)
-    teacher_entropy = -(teacher_probs * teacher_log_probs).sum(dim=-1)
-    student_nll = -student_log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
-    teacher_nll = -teacher_log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
-    overlap = topk_overlap(student_logits, teacher_logits, topk)
+        teacher_outputs = teacher_model(
+            input_ids=input_ids.to(teacher_device),
+            attention_mask=attention_mask.to(teacher_device),
+        ).logits
+        teacher_entropy, teacher_nll, teacher_topk = selected_token_metrics(
+            teacher_outputs, target_ids, selected_mask, topk
+        )
+        del teacher_outputs
+
+    overlap = (student_topk.unsqueeze(-1) == teacher_topk.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
 
     rows = []
     for idx in range(input_ids.size(0)):
-        valid = torch.nonzero(target_mask[idx], as_tuple=False).flatten()
-        if valid.numel() == 0:
+        token_mask = sample_indices == idx
+        if not token_mask.any():
             rows.append(empty_metrics())
             continue
 
-        start = min_prefix_tokens
-        tail_start = int(valid.numel() * (1.0 - tail_fraction))
-        start = max(start, tail_start)
-        selected = valid[valid >= start]
-        if selected.numel() == 0:
-            selected = valid
-
-        hs = student_entropy[idx, selected]
-        ht = teacher_entropy[idx, selected]
-        ns = student_nll[idx, selected]
-        nt = teacher_nll[idx, selected]
-        ov = overlap[idx, selected]
+        hs = student_entropy[token_mask]
+        ht = teacher_entropy[token_mask]
+        ns = student_nll[token_mask]
+        nt = teacher_nll[token_mask]
+        ov = overlap[token_mask]
         rows.append(
             {
-                "prompt_score_num_tokens": float(selected.numel()),
+                "prompt_score_num_tokens": float(token_mask.sum().item()),
                 "prompt_entropy_student": float(hs.mean().item()),
                 "prompt_entropy_teacher": float(ht.mean().item()),
                 "prompt_entropy_gap": float((hs - ht).mean().item()),
@@ -187,11 +219,9 @@ def empty_metrics() -> dict[str, float]:
 
 def add_scores(df: pd.DataFrame, topk: int) -> pd.DataFrame:
     entropy_gap = df["prompt_entropy_gap"].clip(lower=0)
-    nll_gap = df["prompt_nll_gap"].clip(lower=0)
     entropy_clip = entropy_gap.quantile(0.95)
-    nll_clip = nll_gap.quantile(0.95)
     overlap = df[f"prompt_top{topk}_overlap"].clip(lower=0)
-    df["opd_prompt_score"] = overlap * entropy_gap.clip(upper=entropy_clip) * nll_gap.clip(upper=nll_clip)
+    df["opd_prompt_score"] = overlap * entropy_gap.clip(upper=entropy_clip)
     return df
 
 
@@ -226,6 +256,16 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_parquet(args.input)
+    if args.num_shards < 1:
+        raise ValueError("--num-shards must be >= 1")
+    if not (0 <= args.shard_index < args.num_shards):
+        raise ValueError("--shard-index must be in [0, num_shards)")
+    df = df.reset_index(drop=True)
+    df["__opd_original_index"] = range(len(df))
+    if args.num_shards > 1:
+        df = df.iloc[args.shard_index :: args.num_shards].copy().reset_index(drop=True)
+        print(f"Scoring shard {args.shard_index}/{args.num_shards}: {len(df)} rows")
+
     prompts = [extract_prompt_text(row) for _, row in df.iterrows()]
     question_texts = [strip_instruction(prompt) for prompt in prompts]
 
@@ -261,19 +301,18 @@ def main() -> None:
     scored = pd.concat([df.reset_index(drop=True), pd.DataFrame(metrics)], axis=1)
     scored = add_scores(scored, args.topk)
 
-    scored_path = output_dir / "opd_prompt_scores.parquet"
+    if args.num_shards > 1:
+        scored_path = output_dir / f"opd_prompt_scores_shard{args.shard_index}of{args.num_shards}.parquet"
+    else:
+        scored_path = output_dir / "opd_prompt_scores.parquet"
     scored.to_parquet(scored_path, index=False)
     print(f"Wrote {scored_path} ({len(scored)} rows)")
 
-    top_fracs = [float(x) for x in args.top_fracs.split(",") if x.strip()]
-    write_subsets(scored, output_dir, top_fracs, args.topk)
+    if args.num_shards == 1:
+        top_fracs = [float(x) for x in args.top_fracs.split(",") if x.strip()]
+        write_subsets(scored, output_dir, top_fracs, args.topk)
 
-    summary_cols = [
-        "prompt_entropy_gap",
-        "prompt_nll_gap",
-        f"prompt_top{args.topk}_overlap",
-        "opd_prompt_score",
-    ]
+    summary_cols = ["prompt_entropy_gap", "prompt_nll_gap", f"prompt_top{args.topk}_overlap", "opd_prompt_score"]
     print(scored[summary_cols].describe(percentiles=[0.1, 0.2, 0.5, 0.8, 0.9, 0.95]))
 
 
