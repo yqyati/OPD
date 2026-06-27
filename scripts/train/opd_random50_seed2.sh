@@ -82,14 +82,14 @@ export LOSS_AGG_MODE=${LOSS_AGG_MODE:-"token-mean"} # TODO: "token-mean" / "seq-
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/OpenThoughts3_opd.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/sampled_complement_30k.parquet
 # export TRAIN_DATASET=datasets/DeepMath-103K/verl_format/train_filtered_sampled.parquet
-export TRAIN_DATASET=datasets/opd_prompt_filter/opd_prompt_score_top50.parquet
+export TRAIN_DATASET=datasets/opd_prompt_filter/opd_prompt_score_random50_seed2.parquet
 # export TRAIN_DATASET=datasets/Skywork-OR1-RL-Data/data/math-00000-of-00001.parquet
 # export TRAIN_DATASET=datasets/Skywork-OR1-RL-Data/filtered/math-1p5b-filtered-diff-max8.parquet
 # export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math.parquet
 # export TRAIN_DATASET=datasets/skywork/train_7b_math.parquet
 # export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math_part2.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/verl_format/train.parquet
-export TRAIN_DATASET_NAME=DAPO-Math-17k-TeacherAligned-Top50
+export TRAIN_DATASET_NAME=DAPO-Math-17k-TeacherAligned-Random50-seed2
 # export TRAIN_DATASET_NAME=POLARIS-4B-S1
 # export TRAIN_DATASET_NAME=Skywork-OR1-RL-Data
 # export TRAIN_DATASET_NAME=DAPO-Math-17k-1percent
@@ -285,9 +285,9 @@ if [ "${STEP}" -lt "${MIN_SUCCESS_STEP}" ]; then
 fi
 
 CKPT_DIR="${CKPT_PATH}/global_step_${STEP}/actor"
-MODEL_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/opd_top50_lr${LR}_step${STEP}"
+MODEL_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/opd_random50_seed2_lr${LR}_step${STEP}"
 DATA_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data"
-OUTPUT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/justrl_eval_outputs_31744"
+OUTPUT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_31744"
 EVAL_DIR="${OUTPUT_DIR}/$(basename "${MODEL_DIR}")"
 
 echo "Using checkpoint: ${CKPT_DIR}"

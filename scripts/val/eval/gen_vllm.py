@@ -212,7 +212,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default="justrl_eval_outputs",
+        default="outputs/eval/justrl_eval_outputs",
         help="Directory where jsonl generation outputs are written.",
     )
     parser.add_argument(

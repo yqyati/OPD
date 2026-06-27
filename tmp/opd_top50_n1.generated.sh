@@ -5,7 +5,7 @@
 #SBATCH --account=test
 #SBATCH --partition=TEST1
 #SBATCH --exclude=g[81-82]
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=500G
@@ -13,6 +13,8 @@
 #SBATCH --ntasks-per-node=1
 
 set -x
+
+cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
 
 export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
 
@@ -29,8 +31,6 @@ if [ -z "$SLURM_JOB_ID" ]; then
     echo "Start time: $(date)"
     echo "=========================================="
 fi
-
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
 
 ray stop --force
 export RAY_memory_usage_threshold=0.99
@@ -55,19 +55,19 @@ export GRPO_OUTCOME_WEIGHT=1.0
 
 # DeepMath-103K
 export MAX_PROMPT_LENGTH=1024
-export MAX_RESP_LENGTH=4096  # TODO: 31744 /15360 / 7168 / 4096 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=4096 # TODO: 15360 / 7168 / 4096 / 3072
+export MAX_RESP_LENGTH=7168  # TODO: 31744 /15360 / 7168 / 4096 / 3072 / 5120
+export MAX_VAL_RESP_LENGTH=7168 # TODO: 15360 / 7168 / 4096 / 3072
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # PPO minibatch size. TODO: 1 / 8 / 16 / 32 / 64 / 96 / 128 (default 64)
-export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128} # Prompt batch size per training step.
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # TODO: 1 / 8 / 16 / 32 / 64 (default 64)
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)
 export TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0} # Teacher logits temperature (default 1.0, no scaling)
 export REPETITION_PENALTY=${REPETITION_PENALTY:-1.0} # TODO: 1.0 / 1.1 / 1.2 (default 1.0, no penalty)
-export N_RESPONSES=1 # TODO: 1 / 4 / 8 / 16 / 32 (default: 8)
+export N_RESPONSES=1 # n=1 top50 ablation
 export LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16} # 0 represents no top-k sampling
 export TOP_K_STRATEGY=${TOP_K_STRATEGY:-"only_stu"} # "only_stu" or "only_tch" or "intersection" or "union" or "union-intersection"
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-"student_p"} # "student_p" or "teacher_p" or "none"
-# export LR=${LR:-1e-6}
+export LR=${LR:-1e-5}
+export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 # export LR_SCHEDULER=${LR_SCHEDULER:-constant}
 export USE_KL=${USE_KL:-False} # TODO: True / False (default False)
 export ENABLE_FORMAT_REWARD=${ENABLE_FORMAT_REWARD:-False} # TODO: True / False (default False)
@@ -82,14 +82,14 @@ export LOSS_AGG_MODE=${LOSS_AGG_MODE:-"token-mean"} # TODO: "token-mean" / "seq-
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/OpenThoughts3_opd.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/sampled_complement_30k.parquet
 # export TRAIN_DATASET=datasets/DeepMath-103K/verl_format/train_filtered_sampled.parquet
-export TRAIN_DATASET=datasets/dapo-math-17k-teacher-aligned.parquet
+export TRAIN_DATASET=datasets/opd_prompt_filter/opd_prompt_score_top50.parquet
 # export TRAIN_DATASET=datasets/Skywork-OR1-RL-Data/data/math-00000-of-00001.parquet
 # export TRAIN_DATASET=datasets/Skywork-OR1-RL-Data/filtered/math-1p5b-filtered-diff-max8.parquet
 # export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math.parquet
 # export TRAIN_DATASET=datasets/skywork/train_7b_math.parquet
 # export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math_part2.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/verl_format/train.parquet
-export TRAIN_DATASET_NAME=DAPO-Math-17k-TeacherAligned
+export TRAIN_DATASET_NAME=DAPO-Math-17k-TeacherAligned-Top50-n1
 # export TRAIN_DATASET_NAME=POLARIS-4B-S1
 # export TRAIN_DATASET_NAME=Skywork-OR1-RL-Data
 # export TRAIN_DATASET_NAME=DAPO-Math-17k-1percent
@@ -138,8 +138,8 @@ export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
 export PROJECT_PATH=checkpoint
 export PARALLEL_SIZE=1
-export RUN_TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
-export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-bs_${TRAIN_BATCH_SIZE}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-${RUN_TIMESTAMP}
+export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
+export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
 
@@ -150,7 +150,7 @@ export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 export HYDRA_FULL_ERROR=1
 
 
-export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-bs_${TRAIN_BATCH_SIZE}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-${RUN_TIMESTAMP}
+export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 
 KL_ARGS=""
 if [ "$USE_KL" = "True" ]; then
@@ -169,14 +169,21 @@ fi
 
 PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))
 export ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-32768}
+TRAIN_BATCH_SIZE=$((${MINI_BATCH_SIZE}*${PARALLEL_SIZE}))
+EXPECTED_STEPS=$(python3 -c "import pandas as pd; n=len(pd.read_parquet('${TRAIN_DATASET}')); bs=${TRAIN_BATCH_SIZE}; ep=${TOTAL_EPOCHS}; print(max(1, (n // bs) * ep))")
+MIN_SUCCESS_STEP=$(python3 -c "import math; print(math.ceil(${EXPECTED_STEPS} * 0.9))")
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 echo "ROLLOUT_MAX_NUM_BATCHED_TOKENS: $ROLLOUT_MAX_NUM_BATCHED_TOKENS"
+echo "TRAIN_BATCH_SIZE: $TRAIN_BATCH_SIZE"
+echo "EXPECTED_STEPS: $EXPECTED_STEPS"
+echo "MIN_SUCCESS_STEP: $MIN_SUCCESS_STEP"
 
 
 ray start --head
 sleep 5
 
 
+set +e
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
@@ -189,11 +196,12 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
+    +data.apply_chat_template_kwargs.enable_thinking=False \
     actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_activation_offload=False \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=$LR \
     $LR_ARGS \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
@@ -245,67 +253,78 @@ python3 -m verl.trainer.main_ppo \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.validation_data_dir=validation_log/$EXPERIMENT_NAME \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=-1 \
-    trainer.total_epochs=2 \
+    trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT
+TRAIN_EXIT=$?
+set -e
 
-TRAIN_EXIT_CODE=$?
+echo "Training exit code: ${TRAIN_EXIT}"
+echo "Checkpoint path: ${CKPT_PATH}"
 
-ray stop --force || true
-sleep 5
+STEP=${STEP:-latest}
+if [ "${STEP}" = "latest" ]; then
+    STEP=$(find "${CKPT_PATH}" -maxdepth 1 -type d -name 'global_step_*' \
+        | sed -E 's#.*/global_step_([0-9]+)$#\1#' \
+        | sort -n \
+        | tail -1)
+fi
 
-LATEST_ACTOR_DIR=$(find "$CKPT_PATH" -path "$CKPT_PATH/global_step_*/actor" -type d | sort -V | tail -n 1)
-if [ -z "$LATEST_ACTOR_DIR" ]; then
-    echo "No actor checkpoint found under $CKPT_PATH"
-    echo "Training exit code: $TRAIN_EXIT_CODE"
+if [ -z "${STEP}" ]; then
+    echo "No saved checkpoint found under ${CKPT_PATH}" >&2
+    exit "${TRAIN_EXIT}"
+fi
+
+if [ "${STEP}" -lt "${MIN_SUCCESS_STEP}" ]; then
+    echo "Latest checkpoint step ${STEP} is below 90% success threshold ${MIN_SUCCESS_STEP}/${EXPECTED_STEPS}; skip merge and eval." >&2
     exit 1
 fi
 
-if [ "$TRAIN_EXIT_CODE" -ne 0 ]; then
-    echo "Training exited with code ${TRAIN_EXIT_CODE}, but checkpoint exists; continue merge and evaluation."
+CKPT_DIR="${CKPT_PATH}/global_step_${STEP}/actor"
+MODEL_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/opd_top50_n1_lr${LR}_step${STEP}"
+DATA_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data"
+OUTPUT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_31744"
+EVAL_DIR="${OUTPUT_DIR}/$(basename "${MODEL_DIR}")"
+
+echo "Using checkpoint: ${CKPT_DIR}"
+echo "Merged model dir: ${MODEL_DIR}"
+echo "Eval dir: ${EVAL_DIR}"
+
+if [ ! -d "${CKPT_DIR}" ]; then
+    echo "Missing checkpoint dir: ${CKPT_DIR}" >&2
+    exit 1
 fi
 
-set -e
+if [ ! -f "${MODEL_DIR}/config.json" ]; then
+    python -m verl.model_merger merge \
+        --backend fsdp \
+        --local_dir "${CKPT_DIR}" \
+        --target_dir "${MODEL_DIR}"
+fi
 
-echo "=========================================="
-echo "Start merge and evaluation."
-echo "Training exit code: $TRAIN_EXIT_CODE"
-echo "Checkpoint root: $CKPT_PATH"
-echo "=========================================="
+if [ ! -f "${MODEL_DIR}/config.json" ]; then
+    echo "Missing model config: ${MODEL_DIR}/config.json" >&2
+    exit 1
+fi
 
-LATEST_STEP=$(basename "$(dirname "$LATEST_ACTOR_DIR")")
-MERGED_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/${EXPERIMENT_NAME}_${LATEST_STEP}"
-DATA_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data"
-OUTPUT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/justrl_eval_outputs"
-EVAL_DIR="${OUTPUT_DIR}/$(basename "$MERGED_DIR")"
-
-echo "Latest actor checkpoint: $LATEST_ACTOR_DIR"
-echo "Merged model dir: $MERGED_DIR"
-echo "Eval dir: $EVAL_DIR"
-
-python3 -m verl.model_merger merge \
-    --backend fsdp \
-    --local_dir "$LATEST_ACTOR_DIR" \
-    --target_dir "$MERGED_DIR"
-
-python3 scripts/val/eval/gen_vllm.py \
-    --model "$MERGED_DIR" \
-    --data-dir "$DATA_DIR" \
-    --output-dir "$OUTPUT_DIR" \
+python scripts/val/eval/gen_vllm.py \
+    --model "${MODEL_DIR}" \
+    --data-dir "${DATA_DIR}" \
+    --output-dir "${OUTPUT_DIR}" \
     --tasks AIME24,AIME25,AMC23 \
     --n 16 \
-    --max-tokens "$MAX_VAL_RESP_LENGTH" \
+    --max-tokens 31744 \
     --temperature 0.7 \
     --top-p 0.95 \
-    --gpus 0,1,2,3,4,5,6,7 \
+    --gpus 0,1,2,3 \
     --disable-thinking
 
-python3 scripts/val/eval/grade.py \
-    --eval-dir "$EVAL_DIR"
+python scripts/val/eval/grade.py \
+    --eval-dir "${EVAL_DIR}"
 
 # Log the end time for local runs.
 if [ -z "$SLURM_JOB_ID" ]; then

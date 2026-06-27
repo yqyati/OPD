@@ -69,7 +69,7 @@ pip install -r requirements/metrics.txt
 Use the following command to start on-policy distillation:
 
 ```bash
-bash on_policy_distillation.sh
+bash scripts/train/on_policy_distillation.sh
 ```
 
 <details>
@@ -143,7 +143,7 @@ We release the resulting SFT checkpoint [Qwen3-1.7B-SFT](https://huggingface.co/
 
 #### RL (GRPO)
 
-We use GRPO as the RL algorithm. To enable RL, set `ADV_ESTIMATOR=grpo` and `LOG_PROB_TOP_K=0`. A reference script `grpo.sh` is provided.
+We use GRPO as the RL algorithm. To enable RL, set `ADV_ESTIMATOR=grpo` and `LOG_PROB_TOP_K=0`. A reference script `scripts/train/grpo.sh` is provided.
 
 We release the resulting RL checkpoint [Qwen3-4B-Base-GRPO](https://huggingface.co/lllyx/Qwen3-4B-Base-GRPO), which is obtained by zero RL from `Qwen3-4B-Base`.
 
