@@ -35,6 +35,15 @@ from verl.utils.model import compute_position_id_with_mask
 logger = logging.getLogger(__name__)
 
 
+def _get_teacher_prefix_text(example: dict) -> str:
+    prefix = example.get("teacher_prefix_text", "")
+    if prefix is None:
+        return ""
+    if isinstance(prefix, float) and np.isnan(prefix):
+        return ""
+    return str(prefix)
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -301,6 +310,7 @@ class RLHFDataset(Dataset):
             raw_prompt = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
+            raw_prompt += _get_teacher_prefix_text(row_dict)
             multi_modal_data = {}
 
             images = None
@@ -363,6 +373,7 @@ class RLHFDataset(Dataset):
             raw_prompt = self.tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
+            raw_prompt += _get_teacher_prefix_text(row_dict)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
