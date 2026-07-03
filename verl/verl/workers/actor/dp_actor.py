@@ -84,7 +84,13 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False, top_k=0, student_top_k_ids=None
+        self,
+        micro_batch,
+        temperature,
+        calculate_entropy=False,
+        top_k=0,
+        student_top_k_ids=None,
+        return_full_log_probs=False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -108,6 +114,7 @@ class DataParallelPPOActor(BasePPOActor):
             entropy = None
             topk_ids = None
             topk_log_probs = None
+            full_log_probs_for_return = None
             
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
@@ -331,7 +338,8 @@ class DataParallelPPOActor(BasePPOActor):
                 # only return response part:
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
-                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                full_log_probs_for_return = full_log_probs.squeeze(-1)
+                log_probs = full_log_probs_for_return[:, -response_length - 1 : -1]  # (bsz, response_length)
                 
                 if top_k > 0:
                     topk_ids = full_topk_ids[:, -response_length - 1 : -1, :]
@@ -356,31 +364,33 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+                    if return_full_log_probs:
+                        full_log_probs_for_return = output.log_probs
 
                 else:
                     logits = output.logits
 
                     logits.div_(temperature)
-                    logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
-                    
+                    logits_for_response = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+
                     # Optimization: when top_k > 0, compute log_softmax once and gather both
                     # log_probs and topk_log_probs to avoid duplicate computation
                     need_topk = top_k > 0
                     if need_topk:
                         # Compute log_softmax once for both target and topk tokens
-                        log_probs_all = torch.log_softmax(logits, dim=-1)
+                        log_probs_all = torch.log_softmax(logits_for_response, dim=-1)
                         # Gather log_probs for target tokens (responses)
                         log_probs = log_probs_all.gather(
                             dim=-1, index=micro_batch["responses"].unsqueeze(-1)
                         ).squeeze(-1)
                     else:
-                        log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                        log_probs = logprobs_from_logits(logits_for_response, micro_batch["responses"])
                     
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
-                            entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                            entropy = verl_F.entropy_from_logits(logits_for_response)  # (bsz, response_length)
                         else:
-                            entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                            entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits_for_response)
                     
                     if need_topk:
                         if student_top_k_ids is not None:
@@ -392,6 +402,15 @@ class DataParallelPPOActor(BasePPOActor):
                         # Use pre-computed log_probs_all (always available when need_topk=True)
                         topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
 
+                    if return_full_log_probs:
+                        shifted_logits = logits[:, :-1, :]
+                        shifted_labels = input_ids[:, 1:]
+                        shifted_log_probs = logprobs_from_logits(shifted_logits, shifted_labels)
+                        full_log_probs_for_return = torch.zeros_like(input_ids, dtype=shifted_log_probs.dtype)
+                        full_log_probs_for_return[:, :-1] = shifted_log_probs
+
+            if return_full_log_probs:
+                return entropy, log_probs, topk_ids, topk_log_probs, full_log_probs_for_return
             return entropy, log_probs, topk_ids, topk_log_probs
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -753,6 +772,13 @@ class DataParallelPPOActor(BasePPOActor):
 
         if "format_mask" in data.batch.keys():
             select_keys.append("format_mask") # (bsz, 1)
+
+        teacher_prefix_sft_loss_coef = self.config.get("teacher_prefix_sft_loss_coef", 0.0)
+        use_teacher_prefix_sft = (
+            teacher_prefix_sft_loss_coef > 0 and "teacher_prefix_sft_mask" in data.batch.keys()
+        )
+        if use_teacher_prefix_sft:
+            select_keys.append("teacher_prefix_sft_mask")
         
         # Include student_top_k_log_probs if present (for top-k distillation)
         if "student_top_k_log_probs" in data.batch.keys():
@@ -822,6 +848,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
+                    full_log_probs = None
                     
                     # Check if we have 3D advantages (top-k sampling case)
                     # If so, we need to recompute top-k log probs for correct gradient
@@ -834,16 +861,28 @@ class DataParallelPPOActor(BasePPOActor):
                         elif "student_top_k_ids" in model_inputs:
                             student_top_k_ids = model_inputs["student_top_k_ids"]
 
-                        entropy, _, _, topk_log_probs = self._forward_micro_batch(
+                        forward_outputs = self._forward_micro_batch(
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
-                            top_k=top_k, student_top_k_ids=student_top_k_ids
+                            top_k=top_k, student_top_k_ids=student_top_k_ids,
+                            return_full_log_probs=use_teacher_prefix_sft,
                         )
+                        if use_teacher_prefix_sft:
+                            entropy, _, _, topk_log_probs, full_log_probs = forward_outputs
+                        else:
+                            entropy, _, _, topk_log_probs = forward_outputs
                         log_prob_for_loss = topk_log_probs
                         
                     else:
-                        _, log_prob, *_ = self._forward_micro_batch(
-                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                        forward_outputs = self._forward_micro_batch(
+                            model_inputs,
+                            temperature=temperature,
+                            calculate_entropy=calculate_entropy,
+                            return_full_log_probs=use_teacher_prefix_sft,
                         )
+                        if use_teacher_prefix_sft:
+                            _, log_prob, *_, full_log_probs = forward_outputs
+                        else:
+                            _, log_prob, *_ = forward_outputs
                         log_prob_for_loss = log_prob
 
                     format_mask = None
@@ -910,6 +949,23 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = pg_loss - entropy_loss * entropy_coeff
                     else:
                         policy_loss = pg_loss
+
+                    if use_teacher_prefix_sft:
+                        teacher_prefix_sft_mask = model_inputs["teacher_prefix_sft_mask"].to(full_log_probs.dtype)
+                        if teacher_prefix_sft_mask.shape[-1] != full_log_probs.shape[-1]:
+                            full_teacher_prefix_sft_mask = torch.zeros_like(full_log_probs)
+                            prompt_mask_len = teacher_prefix_sft_mask.shape[-1]
+                            full_teacher_prefix_sft_mask[:, :prompt_mask_len] = teacher_prefix_sft_mask
+                            teacher_prefix_sft_mask = full_teacher_prefix_sft_mask
+                        if teacher_prefix_sft_mask.sum() > 0:
+                            teacher_prefix_sft_loss = -verl_F.masked_mean(full_log_probs, teacher_prefix_sft_mask)
+                        else:
+                            teacher_prefix_sft_loss = full_log_probs.sum() * 0.0
+                        policy_loss = policy_loss + teacher_prefix_sft_loss_coef * teacher_prefix_sft_loss
+                        micro_batch_metrics["actor/teacher_prefix_sft_loss"] = (
+                            teacher_prefix_sft_loss.detach().item() * loss_scale_factor
+                        )
+                        micro_batch_metrics["actor/teacher_prefix_sft_loss_coef"] = teacher_prefix_sft_loss_coef
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]

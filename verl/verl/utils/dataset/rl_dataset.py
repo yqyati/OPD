@@ -44,6 +44,33 @@ def _get_teacher_prefix_text(example: dict) -> str:
     return str(prefix)
 
 
+def _build_teacher_prefix_sft_mask(
+    *,
+    base_prompt_ids: list[int],
+    full_prompt_ids: list[int],
+    max_prompt_length: int,
+    truncation: str,
+) -> torch.Tensor:
+    mask = torch.zeros(max_prompt_length, dtype=torch.float32)
+    base_len = len(base_prompt_ids)
+    full_len = len(full_prompt_ids)
+    if full_len <= base_len or base_len == 0:
+        return mask
+
+    if full_len > max_prompt_length:
+        if truncation == "error":
+            raise RuntimeError(f"Prompt length {full_len} is longer than {max_prompt_length}.")
+        # For teacher-prefix SFT we require exact prefix-token alignment.
+        return mask
+
+    offset = max_prompt_length - full_len
+    start = offset + base_len - 1
+    end = offset + full_len - 1
+    if start < end:
+        mask[start:end] = 1.0
+    return mask
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -307,10 +334,11 @@ class RLHFDataset(Dataset):
         if self.processor is not None:
             from verl.utils.dataset.vision_utils import process_image, process_video
 
-            raw_prompt = self.processor.apply_chat_template(
+            base_prompt = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
-            raw_prompt += _get_teacher_prefix_text(row_dict)
+            teacher_prefix_text = _get_teacher_prefix_text(row_dict)
+            raw_prompt = base_prompt + teacher_prefix_text
             multi_modal_data = {}
 
             images = None
@@ -370,13 +398,23 @@ class RLHFDataset(Dataset):
                     "chat_template should be provided in apply_chat_template_kwargs or tokenizer config, "
                     "models like GLM can copy chat_template.jinja from instruct models"
                 )
-            raw_prompt = self.tokenizer.apply_chat_template(
+            base_prompt = self.tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
-            raw_prompt += _get_teacher_prefix_text(row_dict)
+            teacher_prefix_text = _get_teacher_prefix_text(row_dict)
+            raw_prompt = base_prompt + teacher_prefix_text
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
+
+        base_prompt_ids = self.tokenizer.encode(base_prompt, add_special_tokens=False)
+        full_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        teacher_prefix_sft_mask = _build_teacher_prefix_sft_mask(
+            base_prompt_ids=base_prompt_ids,
+            full_prompt_ids=full_prompt_ids,
+            max_prompt_length=self.max_prompt_length,
+            truncation=self.truncation,
+        )
 
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
@@ -426,8 +464,9 @@ class RLHFDataset(Dataset):
         row_dict["input_ids"] = input_ids[0]
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
+        row_dict["teacher_prefix_sft_mask"] = teacher_prefix_sft_mask
 
-        raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        raw_prompt_ids = full_prompt_ids
         if len(raw_prompt_ids) > self.max_prompt_length:
             if self.truncation == "left":
                 raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length :]

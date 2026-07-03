@@ -293,3 +293,137 @@ TeacherHint64 + 50% dropout + suffix OPD n=1
 ```
 
 If this does not beat full all-data `n=1`, stop teacher-context methods and move to teacher-as-judge for `n>1` rollouts.
+
+## 2026-07-03 TeacherPrefix128 SFT-Prefix + Suffix OPD Result
+
+Experiment:
+
+```text
+TeacherPrefix128 + SFT(prefix, coef=0.1) + suffix OPD n=1
+train data: datasets/teacher_prefix/opd_prompt_all_teacher_prefix128.parquet
+checkpoint: global_step_279
+merged model: merged_models/opd_teacher_prefix128_sftprefix_suffix_opd_n1_lr1e-5_coef0.1_step279
+eval: n=16, temperature=0.7, top_p=0.95, max_tokens=31744, disable_thinking
+grading: rule-based only, no CompassVerifier
+```
+
+Results:
+
+| Run | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Student baseline | 0.283333 | 0.237500 | 0.732812 | 0.417882 |
+| Teacher | 0.516667 | 0.372917 | 0.879687 | 0.589757 |
+| Full OPD all-data n=1 | 0.450000 | 0.337500 | 0.832813 | 0.540104 |
+| Full OPD all-data n=4 | 0.466667 | 0.318750 | 0.878125 | 0.554514 |
+| TeacherPrefix128 + suffix OPD n=1 | 0.439583 | 0.356250 | 0.834375 | 0.543403 |
+| TeacherPrefix256 + suffix OPD n=1 | 0.429167 | 0.331250 | 0.846875 | 0.535764 |
+| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+
+Detailed eval metrics for the SFT-prefix run:
+
+| Task | mean_score | best_score | solve_none | solve_all | avg_output_length | format_error_rollouts |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AIME24 | 0.495833 | 0.766667 | 7 | 6 | 10222.66 | 26 |
+| AIME25 | 0.325000 | 0.500000 | 15 | 5 | 9919.36 | 53 |
+| AMC23 | 0.831250 | 0.975000 | 1 | 20 | 6868.01 | 33 |
+
+Teacher gap for `TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1`:
+
+| Metric | Gap vs Teacher |
+| --- | ---: |
+| AIME24 | -0.020834 |
+| AIME25 | -0.047917 |
+| AMC23 | -0.048437 |
+| Avg | -0.039063 |
+
+Interpretation:
+
+- Adding prefix SFT improves over `TeacherPrefix128 + suffix OPD n=1` by `+0.007291` average.
+- It also improves over `Full OPD all-data n=1` by `+0.010590` average.
+- It is close to, but still slightly below, `Full OPD all-data n=4` by `-0.003820` average.
+- The gain is concentrated on AIME24: `0.495833`, higher than the listed OPD baselines and close to the teacher `0.516667`.
+- AIME25 and AMC23 do not improve over the strongest corresponding baselines, so the effect is not uniform.
+- Training was stable. The prefix SFT loss stayed bounded but did not show a clean monotonic decrease, suggesting coef `0.1` may be conservative.
+
+Next run:
+
+```text
+TeacherPrefix128 + SFT(prefix, coef=0.2) + suffix OPD n=1
+```
+
+The script `/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/tmp_now.bash` was updated to default `TEACHER_PREFIX_SFT_LOSS_COEF=0.2`.
+
+## 2026-07-03 TeacherPrefix128 SFT-Prefix coef=0.2 Result
+
+Experiment:
+
+```text
+TeacherPrefix128 + SFT(prefix, coef=0.2) + suffix OPD n=1
+train data: datasets/teacher_prefix/opd_prompt_all_teacher_prefix128.parquet
+checkpoint: global_step_279
+merged model: merged_models/opd_teacher_prefix128_sftprefix_suffix_opd_n1_lr1e-5_coef0.2_step279
+eval: n=16, temperature=0.7, top_p=0.95, max_tokens=31744, disable_thinking
+grading: rule-based only, no CompassVerifier
+```
+
+Results:
+
+| Run | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Full OPD all-data n=1 | 0.450000 | 0.337500 | 0.832813 | 0.540104 |
+| Full OPD all-data n=4 | 0.466667 | 0.318750 | 0.878125 | 0.554514 |
+| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+| TeacherPrefix128 + SFT(prefix, 0.2) + suffix OPD n=1 | 0.464583 | 0.339583 | 0.812500 | 0.538889 |
+
+Detailed eval metrics for the coef `0.2` run:
+
+| Task | mean_score | best_score | solve_none | solve_all | avg_output_length | format_error_rollouts |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AIME24 | 0.464583 | 0.800000 | 6 | 3 | 10288.17 | 24 |
+| AIME25 | 0.339583 | 0.533333 | 14 | 5 | 9621.23 | 44 |
+| AMC23 | 0.812500 | 0.975000 | 1 | 19 | 7108.48 | 35 |
+
+Interpretation:
+
+- Increasing SFT coef from `0.1` to `0.2` hurts average score: `0.550694 -> 0.538889`.
+- The only task-level gain is AIME25: `0.325000 -> 0.339583`.
+- AIME24 drops clearly: `0.495833 -> 0.464583`.
+- AMC23 also drops: `0.831250 -> 0.812500`.
+- This suggests the useful range for prefix SFT is not larger than `0.1`; pushing harder on teacher-prefix imitation starts to interfere with suffix OPD behavior.
+
+## 2026-07-03 TeacherPrefix256 SFT-Prefix coef=0.1 Result
+
+Experiment:
+
+```text
+TeacherPrefix256 + SFT(prefix, coef=0.1) + suffix OPD n=1
+train data: datasets/teacher_prefix/opd_prompt_all_teacher_prefix256.parquet
+checkpoint: global_step_279
+merged model: merged_models/opd_teacher_prefix256_sftprefix_suffix_opd_n1_lr1e-5_coef0.1_step279
+eval: n=16, temperature=0.7, top_p=0.95, max_tokens=31744, disable_thinking
+grading: rule-based only, no CompassVerifier
+```
+
+Results:
+
+| Run | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Full OPD all-data n=1 | 0.450000 | 0.337500 | 0.832813 | 0.540104 |
+| Full OPD all-data n=4 | 0.466667 | 0.318750 | 0.878125 | 0.554514 |
+| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+| TeacherPrefix256 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.431250 | 0.337500 | 0.850000 | 0.539583 |
+
+Detailed eval metrics for the 256-prefix coef `0.1` run:
+
+| Task | mean_score | best_score | solve_none | solve_all | avg_output_length | format_error_rollouts |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AIME24 | 0.431250 | 0.733333 | 8 | 5 | 10213.44 | 31 |
+| AIME25 | 0.337500 | 0.533333 | 14 | 6 | 9818.06 | 43 |
+| AMC23 | 0.850000 | 0.975000 | 1 | 21 | 6973.64 | 26 |
+
+Interpretation:
+
+- `TeacherPrefix256 + SFT(prefix, 0.1)` does not improve over full OPD all-data n=1 on average: `0.539583` vs `0.540104`.
+- It is lower than `TeacherPrefix128 + SFT(prefix, 0.1)` by `-0.011111` average.
+- The longer prefix helps AMC23 (`0.850000`) but hurts AIME24 sharply (`0.431250`).
+- This supports the earlier concern that a longer fixed teacher prefix can push the student into a less useful or partially truncated reasoning state.
