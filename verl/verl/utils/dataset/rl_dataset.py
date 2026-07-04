@@ -231,6 +231,7 @@ class RLHFDataset(Dataset):
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
+                        raw_prompt = raw_prompt + _get_teacher_prefix_text(doc)
                         if image_key in doc and doc[image_key]:
                             images = [
                                 process_image(image, image_patch_size=self.image_patch_size) for image in doc[image_key]
@@ -273,9 +274,11 @@ class RLHFDataset(Dataset):
                         if self.tool_schemas is not None:
                             apply_kwargs["tools"] = self.tool_schemas
 
-                        return len(
-                            tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
+                        base_prompt = tokenizer.apply_chat_template(
+                            doc[prompt_key], add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
+                        raw_prompt = base_prompt + _get_teacher_prefix_text(doc)
+                        return len(tokenizer.encode(raw_prompt, add_special_tokens=False))
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()

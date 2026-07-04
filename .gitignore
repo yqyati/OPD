@@ -41,3 +41,4 @@ analysis_plots/
 *.local
 
 datasets/
+gold_checkpoint/

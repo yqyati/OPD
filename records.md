@@ -427,3 +427,50 @@ Interpretation:
 - It is lower than `TeacherPrefix128 + SFT(prefix, 0.1)` by `-0.011111` average.
 - The longer prefix helps AMC23 (`0.850000`) but hurts AIME24 sharply (`0.431250`).
 - This supports the earlier concern that a longer fixed teacher prefix can push the student into a less useful or partially truncated reasoning state.
+
+## 2026-07-04 TeacherGuide128 SFT-Guide coef=0.05 Result
+
+Experiment:
+
+```text
+TeacherGuide128 + SFT(guide, coef=0.05) + OPD n=1
+train data: datasets/teacher_hint/opd_prompt_all_teacher_guide128.parquet
+checkpoint: global_step_279
+merged model: merged_models/opd_teacher_guide128_sftguide_opd_n1_lr1e-5_coef0.05_step279
+eval: n=16, temperature=0.7, top_p=0.95, max_tokens=31744, disable_thinking
+grading: rule-based only, no CompassVerifier
+```
+
+Results:
+
+| Run | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Full OPD all-data n=1 | 0.450000 | 0.337500 | 0.832813 | 0.540104 |
+| Full OPD all-data n=4 | 0.466667 | 0.318750 | 0.878125 | 0.554514 |
+| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+| TeacherGuide128 + SFT(guide, 0.05) + OPD n=1 | 0.450000 | 0.339583 | 0.829688 | 0.539757 |
+
+Detailed eval metrics:
+
+| Task | mean_score | best_score | solve_none | solve_all | avg_output_length | format_error_rollouts |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AIME24 | 0.450000 | 0.833333 | 5 | 4 | 10157.35 | 15 |
+| AIME25 | 0.339583 | 0.433333 | 17 | 3 | 9691.36 | 45 |
+| AMC23 | 0.829688 | 0.950000 | 2 | 18 | 7137.89 | 24 |
+
+Guide-data diagnosis:
+
+| Metric | Value |
+| --- | ---: |
+| rows | 17917 |
+| mean guide tokens | 128.0 |
+| median guide tokens | 128.0 |
+| max guide tokens | 128 |
+| finish_reason=length | 17917 / 17917 |
+
+Interpretation:
+
+- The score is essentially tied with full OPD all-data n=1: `0.539757` vs `0.540104`.
+- It is below the strongest raw-prefix run, `TeacherPrefix128 + SFT(prefix, 0.1)`, by `-0.010937`.
+- The generated "guide" data is not actually short guide data: every sample hit the `128` token cap and finished by length.
+- Manual samples show the teacher often restates the problem or starts verbose CoT-like text, so this run should be interpreted as a failed guide-generation attempt rather than strong evidence against concise strategy guides.
