@@ -327,6 +327,33 @@ class RLHFDataset(Dataset):
         return messages
 
     def __getitem__(self, item):
+        dataset_len = len(self)
+        current_item = item
+        for attempt in range(dataset_len):
+            try:
+                return self._getitem_impl(current_item)
+            except RuntimeError as exc:
+                message = str(exc)
+                is_length_error = (
+                    "is longer than" in message
+                    or "sequence_length=" in message
+                    or "Prompt length" in message
+                )
+                if not is_length_error:
+                    raise
+                logger.warning(
+                    "Skipping overlong sample at index {} during __getitem__ (attempt {}/{}): {}",
+                    current_item,
+                    attempt + 1,
+                    dataset_len,
+                    message,
+                )
+                current_item = (current_item + 1) % dataset_len
+        raise RuntimeError(
+            f"All {dataset_len} samples failed length checks while trying to recover from index {item}."
+        )
+
+    def _getitem_impl(self, item):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
