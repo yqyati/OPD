@@ -474,3 +474,135 @@ Interpretation:
 - It is below the strongest raw-prefix run, `TeacherPrefix128 + SFT(prefix, 0.1)`, by `-0.010937`.
 - The generated "guide" data is not actually short guide data: every sample hit the `128` token cap and finished by length.
 - Manual samples show the teacher often restates the problem or starts verbose CoT-like text, so this run should be interpreted as a failed guide-generation attempt rather than strong evidence against concise strategy guides.
+
+## 2026-07-05 Qwen3 Teacher Ablation: GRPO Teacher vs No-Think Base Teacher
+
+Experiment:
+
+```text
+Student: Qwen3-1.7B-Base
+GRPO teacher: Qwen3-4B-Base-GRPO
+No-think teacher: Qwen3-4B-Base with enable_thinking=False
+train data for plain OPD: datasets/dapo-math-17k-teacher-aligned.parquet
+train data for no-think prefix: datasets/teacher_prefix/qwen3_base_dapo_math_17k_teacher_prefix128.parquet
+train data for GRPO prefix: datasets/teacher_prefix/qwen3_grpo_dapo_math_17k_teacher_prefix128.parquet
+train data for GRPO pure SFT: datasets/sft/qwen3_grpo_teacher_prefix128_pure_sft.parquet
+rollout n: 1
+lr: 1e-5
+prefix length: 128 tokens
+prefix SFT loss coef: 0.1
+eval: n=16, temperature=0.7, top_p=0.95, max_tokens=31744, disable_thinking
+grading: rule-based only, no CompassVerifier
+```
+
+Results:
+
+| Run | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| GRPO teacher plain OPD | 0.062500 | 0.056250 | 0.425000 | 0.181250 |
+| GRPO teacher prefix128+sft0.1 | 0.118750 | 0.085417 | 0.468750 | 0.224306 |
+| GRPO teacher prefix128 pure SFT | 0.052083 | 0.056250 | 0.350000 | 0.152778 |
+| No-think teacher plain OPD | 0.052083 | 0.029167 | 0.239063 | 0.106771 |
+| No-think teacher prefix128+sft0.1 | 0.060417 | 0.045833 | 0.350000 | 0.152083 |
+
+No-think teacher internal gain:
+
+| Comparison | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| No-think prefix128+sft0.1 - no-think plain OPD | +0.008334 | +0.016666 | +0.110937 | +0.045312 |
+
+Detailed eval metrics:
+
+| Run | Task | mean_score | best_score | solve_none | solve_all | avg_output_length | format_error_rollouts |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GRPO teacher plain OPD | AIME24 | 0.062500 | 0.166667 | 25 | 0 | 16013.6 | 188 |
+| GRPO teacher plain OPD | AIME25 | 0.056250 | 0.200000 | 24 | 0 | 13681.7 | 166 |
+| GRPO teacher plain OPD | AMC23 | 0.425000 | 0.800000 | 8 | 2 | 9790.6 | 164 |
+| GRPO teacher prefix128+sft0.1 | AIME24 | 0.118750 | 0.200000 | 24 | 0 | 14022.6 | 166 |
+| GRPO teacher prefix128+sft0.1 | AIME25 | 0.085417 | 0.333333 | 20 | 1 | 12030.5 | 132 |
+| GRPO teacher prefix128+sft0.1 | AMC23 | 0.468750 | 0.800000 | 8 | 9 | 8694.4 | 127 |
+| GRPO teacher prefix128 pure SFT | AIME24 | 0.052083 | 0.200000 | 24 | 0 | 10834.7 | 221 |
+| GRPO teacher prefix128 pure SFT | AIME25 | 0.056250 | 0.200000 | 24 | 0 | 10094.7 | 186 |
+| GRPO teacher prefix128 pure SFT | AMC23 | 0.350000 | 0.725000 | 11 | 1 | 6929.4 | 166 |
+| No-think teacher plain OPD | AIME24 | 0.052083 | 0.233333 | 23 | 0 | 9762.2 | 175 |
+| No-think teacher plain OPD | AIME25 | 0.029167 | 0.233333 | 23 | 0 | 8654.9 | 148 |
+| No-think teacher plain OPD | AMC23 | 0.239063 | 0.625000 | 15 | 0 | 7029.1 | 167 |
+| No-think teacher prefix128+sft0.1 | AIME24 | 0.060417 | 0.200000 | 24 | 0 | 9174.5 | 151 |
+| No-think teacher prefix128+sft0.1 | AIME25 | 0.045833 | 0.200000 | 24 | 0 | 5699.5 | 83 |
+| No-think teacher prefix128+sft0.1 | AMC23 | 0.350000 | 0.800000 | 8 | 2 | 4790.3 | 85 |
+
+Output-format notes:
+
+| Run | AIME24 Assistant prefix | AIME25 Assistant prefix | AMC23 Assistant prefix | AIME24 unicode prefix | AIME25 unicode prefix | AMC23 unicode prefix |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| No-think teacher plain OPD | 228 / 480 | 230 / 480 | 260 / 640 | 157 / 480 | 133 / 480 | 240 / 640 |
+| No-think teacher prefix128+sft0.1 | 371 / 480 | 368 / 480 | 442 / 640 | 20 / 480 | 19 / 480 | 49 / 640 |
+| GRPO teacher prefix128 pure SFT | 0 / 480 | 0 / 480 | 0 / 640 | 0 / 480 | 0 / 480 | 0 / 640 |
+
+Interpretation:
+
+- No-think teacher is substantially weaker than GRPO teacher in this OPD setting.
+- Within the no-think teacher setting, `TeacherPrefix128 + SFTPrefix + SuffixOPD` still improves over plain OPD: average `0.152083` vs `0.106771`.
+- GRPO teacher pure SFT is not enough by itself: average `0.152778`, below plain OPD `0.181250` and far below joint `GRPO teacher prefix128+sft0.1` `0.224306`.
+- The pure SFT ablation removes obvious `Assistant:` and unicode/garble prefixes, but does not improve task accuracy. This supports the interpretation that SFT prefix stabilizes the beginning distribution, while suffix OPD is needed for answer quality.
+- The no-think prefix run lowers output length and format errors relative to no-think plain OPD, especially on AIME25 and AMC23.
+- However, no-think teacher runs show many `Assistant:` prefixes in generated outputs. This did not happen in the GRPO teacher prefix run, where obvious `Assistant:` and unicode/garble prefixes were previously observed as zero.
+- Main-line Qwen3 result should remain `GRPO teacher prefix128+sft0.1`, with average `0.224306`.
+
+## 2026-07-06 Cross-Experiment Summary Table
+
+This table consolidates the completed DeepSeek/JustRL and Qwen3 ablations.
+
+| Family | Student | Teacher | Method | SFT target | OPD target | AIME24 | AIME25 | AMC23 | Avg |
+| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Student baseline | none | none | 0.283333 | 0.237500 | 0.732812 | 0.417882 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Teacher | none | none | 0.516667 | 0.372917 | 0.879687 | 0.589757 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Full OPD all-data n=1 | none | full student rollout | 0.450000 | 0.337500 | 0.832812 | 0.540104 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Full OPD all-data n=4 | none | full student rollout | 0.466667 | 0.318750 | 0.878125 | 0.554514 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 + suffix OPD n=1 | none | suffix after teacher prefix context | 0.439583 | 0.356250 | 0.834375 | 0.543403 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix256 + suffix OPD n=1 | none | suffix after teacher prefix context | 0.429167 | 0.331250 | 0.846875 | 0.535764 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 pure SFT | teacher prefix 128 | none | 0.279167 | 0.187500 | 0.595313 | 0.353993 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Full-response SFT | full teacher response | none | 0.089583 | 0.081250 | 0.428125 | 0.199653 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 pure SFT init + plain OPD n=1 | teacher prefix 128 as init | full student rollout | 0.441667 | 0.327083 | 0.832812 | 0.533854 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 + SFT(prefix, 0.2) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.464583 | 0.339583 | 0.812500 | 0.538889 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix256 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 256 | suffix after teacher prefix context | 0.431250 | 0.337500 | 0.850000 | 0.539583 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherGuide128 + SFT(guide, 0.05) + OPD n=1 | generated guide 128 | student rollout | 0.450000 | 0.339583 | 0.829688 | 0.539757 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base-GRPO | Plain OPD n=1 | none | full student rollout | 0.062500 | 0.056250 | 0.425000 | 0.181250 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base-GRPO | TeacherPrefix128 pure SFT | teacher prefix 128 | none | 0.052083 | 0.056250 | 0.350000 | 0.152778 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base-GRPO | TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.118750 | 0.085417 | 0.468750 | 0.224306 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | Plain OPD n=1 | none | full student rollout | 0.052083 | 0.029167 | 0.239063 | 0.106771 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | TeacherPrefix128 pure SFT | teacher prefix 128 | none | 0.050000 | 0.029167 | 0.282813 | 0.120660 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | Full-response SFT | full teacher response | none | 0.018750 | 0.006250 | 0.165625 | 0.063542 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | TeacherPrefix128 pure SFT init + plain OPD n=1 | teacher prefix 128 as init | full student rollout | 0.050000 | 0.031250 | 0.251563 | 0.110938 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.060417 | 0.045833 | 0.350000 | 0.152083 |
+
+Key comparisons:
+
+| Family | Comparison | AIME24 | AIME25 | AMC23 | Avg |
+| --- | --- | ---: | ---: | ---: | ---: |
+| DeepSeek/JustRL | Prefix128 pure SFT - Full OPD n=1 | -0.170833 | -0.150000 | -0.237499 | -0.186111 |
+| DeepSeek/JustRL | Full-response SFT - Full OPD n=1 | -0.360417 | -0.256250 | -0.404687 | -0.340451 |
+| DeepSeek/JustRL | Prefix128 pure SFT init + plain OPD - Full OPD n=1 | -0.008333 | -0.010417 | +0.000000 | -0.006250 |
+| DeepSeek/JustRL | Prefix128 SFT(0.1)+suffix OPD - Full OPD n=1 | +0.045833 | -0.012500 | -0.001562 | +0.010590 |
+| DeepSeek/JustRL | Prefix128 SFT(0.1)+suffix OPD - Prefix128 pure SFT | +0.216666 | +0.137500 | +0.235937 | +0.196701 |
+| Qwen3 GRPO teacher | Prefix128 pure SFT - Plain OPD | -0.010417 | +0.000000 | -0.075000 | -0.028472 |
+| Qwen3 GRPO teacher | Prefix128 SFT(0.1)+suffix OPD - Plain OPD | +0.056250 | +0.029167 | +0.043750 | +0.043056 |
+| Qwen3 GRPO teacher | Prefix128 SFT(0.1)+suffix OPD - Prefix128 pure SFT | +0.066667 | +0.029167 | +0.118750 | +0.071528 |
+| Qwen3 no-think teacher | Prefix128 pure SFT - Plain OPD | -0.002083 | +0.000000 | +0.043750 | +0.013889 |
+| Qwen3 no-think teacher | Full-response SFT - Plain OPD | -0.033333 | -0.022917 | -0.073438 | -0.043229 |
+| Qwen3 no-think teacher | Prefix128 pure SFT init + plain OPD - Plain OPD | -0.002083 | +0.002083 | +0.012500 | +0.004167 |
+| Qwen3 no-think teacher | Prefix128 SFT(0.1)+suffix OPD - Plain OPD | +0.008334 | +0.016666 | +0.110937 | +0.045312 |
+| Qwen3 no-think teacher | Prefix128 SFT(0.1)+suffix OPD - Prefix128 pure SFT | +0.010417 | +0.016666 | +0.067187 | +0.031423 |
+
+Summary:
+
+- Prefix-only SFT is not sufficient in either model family.
+- Full-response SFT is unstable and underperforms in both families under the current setup.
+- Prefix-SFT initialization followed by plain OPD recovers most of full OPD on DeepSeek/JustRL, but does not beat full OPD or the joint method.
+- Prefix-SFT initialization followed by plain OPD provides only a small gain on Qwen3 no-think and remains far below the joint method.
+- The joint setting, `TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD`, is the strongest n=1 variant in both families.
+- DeepSeek/JustRL remains much stronger in absolute score than Qwen3 in this setup.
+- Qwen3 GRPO teacher is substantially stronger than Qwen3 no-think base teacher.
+- The current best DeepSeek/JustRL n=1 result is `TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD`, Avg `0.550694`.
+- The current best Qwen3 result is `Qwen3-4B-Base-GRPO TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD`, Avg `0.224306`.
