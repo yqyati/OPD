@@ -71,6 +71,37 @@ def _build_teacher_prefix_sft_mask(
     return mask
 
 
+def _build_teacher_prefix_topk_tensors(
+    *,
+    topk_ids,
+    topk_log_probs,
+    teacher_prefix_sft_mask: torch.Tensor,
+    max_prompt_length: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    ids_arr = np.asarray(topk_ids, dtype=np.int64)
+    logp_arr = np.asarray(topk_log_probs, dtype=np.float32)
+    if ids_arr.ndim != 2 or logp_arr.ndim != 2 or ids_arr.shape != logp_arr.shape:
+        raise RuntimeError(
+            "teacher_prefix_top_k_ids and teacher_prefix_top_k_log_probs must have matching 2D shapes; "
+            f"got {ids_arr.shape=} {logp_arr.shape=}"
+        )
+
+    top_k = ids_arr.shape[-1]
+    out_ids = torch.zeros((max_prompt_length, top_k), dtype=torch.long)
+    out_logp = torch.full((max_prompt_length, top_k), -float("inf"), dtype=torch.float32)
+    prefix_positions = torch.nonzero(teacher_prefix_sft_mask > 0, as_tuple=False).flatten()
+    if len(prefix_positions) != ids_arr.shape[0]:
+        raise RuntimeError(
+            "teacher prefix soft-KL target length does not match teacher_prefix_sft_mask; "
+            f"targets={ids_arr.shape[0]} mask_tokens={len(prefix_positions)}"
+        )
+
+    if len(prefix_positions) > 0:
+        out_ids[prefix_positions] = torch.from_numpy(ids_arr)
+        out_logp[prefix_positions] = torch.from_numpy(logp_arr)
+    return out_ids, out_logp
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -495,6 +526,16 @@ class RLHFDataset(Dataset):
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
         row_dict["teacher_prefix_sft_mask"] = teacher_prefix_sft_mask
+        row_dict["opd_loss_mask"] = torch.tensor(float(row_dict.get("opd_loss_mask", 1.0)), dtype=torch.float32)
+        if "teacher_prefix_top_k_ids" in row_dict and "teacher_prefix_top_k_log_probs" in row_dict:
+            teacher_prefix_top_k_ids, teacher_prefix_top_k_log_probs = _build_teacher_prefix_topk_tensors(
+                topk_ids=row_dict["teacher_prefix_top_k_ids"],
+                topk_log_probs=row_dict["teacher_prefix_top_k_log_probs"],
+                teacher_prefix_sft_mask=teacher_prefix_sft_mask,
+                max_prompt_length=self.max_prompt_length,
+            )
+            row_dict["teacher_prefix_top_k_ids"] = teacher_prefix_top_k_ids
+            row_dict["teacher_prefix_top_k_log_probs"] = teacher_prefix_top_k_log_probs
 
         raw_prompt_ids = full_prompt_ids
         if len(raw_prompt_ids) > self.max_prompt_length:

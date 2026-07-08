@@ -35,6 +35,7 @@ fi
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
 export EVAL_GPUS=${EVAL_GPUS:-0,1,2,3}
 export RUN_MODE=${RUN_MODE:-sequence} # sequence / plain / prefix
+export TEACHER_PREFIX_GENERATION_SCRIPT=${TEACHER_PREFIX_GENERATION_SCRIPT:-scripts/teacher_prefix/run_qwen3_base_teacher_prefix128_4gpu.sh}
 
 if [ "$RUN_MODE" = "sequence" ]; then
     echo "RUN_MODE=sequence: run plain OPD first, then generate no-think teacher prefix, then run prefix OPD."
@@ -43,7 +44,7 @@ if [ "$RUN_MODE" = "sequence" ]; then
         exit 1
     fi
     ray stop --force || true
-    if ! bash scripts/teacher_prefix/run_qwen3_base_teacher_prefix128_4gpu.sh; then
+    if ! bash "$TEACHER_PREFIX_GENERATION_SCRIPT"; then
         echo "Teacher prefix generation failed; stop sequence." >&2
         exit 1
     fi
@@ -79,7 +80,7 @@ export GRPO_OUTCOME_WEIGHT=1.0
 # Qwen3 math-only OPD setting.
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
 export MAX_RESP_LENGTH=7168  # TODO: 31744 /15360 / 7168 / 4096 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=7168 # Trainer validation is disabled; final eval below uses 31744.
+export MAX_VAL_RESP_LENGTH=7168 # Trainer validation is disabled; final eval below uses EVAL_MAX_TOKENS.
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # Must be divisible by the GPU data-parallel size.
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)
@@ -120,13 +121,13 @@ fi
 # export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math_part2.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/verl_format/train.parquet
 if [ "$RUN_MODE" = "plain" ]; then
-    export TRAIN_DATASET=datasets/dapo-math-17k-teacher-aligned.parquet
-    export TRAIN_DATASET_NAME=DAPO-Math-17k-Qwen3Base-NoThinkTeacher-n1
-    export MODEL_OUTPUT_NAME_PREFIX=opd_qwen3base_nothink_teacher_n${N_RESPONSES}_lr${LR}
+    export TRAIN_DATASET=${PLAIN_TRAIN_DATASET:-datasets/dapo-math-17k-teacher-aligned.parquet}
+    export TRAIN_DATASET_NAME=${PLAIN_TRAIN_DATASET_NAME:-DAPO-Math-17k-Qwen3Base-NoThinkTeacher-n1}
+    export MODEL_OUTPUT_NAME_PREFIX=${PLAIN_MODEL_OUTPUT_NAME_PREFIX:-opd_qwen3base_nothink_teacher_n${N_RESPONSES}_lr${LR}}
 elif [ "$RUN_MODE" = "prefix" ]; then
-    export TRAIN_DATASET=datasets/teacher_prefix/qwen3_base_dapo_math_17k_teacher_prefix128.parquet
-    export TRAIN_DATASET_NAME=DAPO-Math-17k-Qwen3Base-NoThinkTeacherPrefix128-SFTPrefix-SuffixOPD-n1
-    export MODEL_OUTPUT_NAME_PREFIX=opd_qwen3base_nothink_teacher_prefix128_sftprefix_suffix_opd_n${N_RESPONSES}_lr${LR}_coef${TEACHER_PREFIX_SFT_LOSS_COEF}
+    export TRAIN_DATASET=${PREFIX_TRAIN_DATASET:-datasets/teacher_prefix/qwen3_base_dapo_math_17k_teacher_prefix128.parquet}
+    export TRAIN_DATASET_NAME=${PREFIX_TRAIN_DATASET_NAME:-DAPO-Math-17k-Qwen3Base-NoThinkTeacherPrefix128-SFTPrefix-SuffixOPD-n1}
+    export MODEL_OUTPUT_NAME_PREFIX=${PREFIX_MODEL_OUTPUT_NAME_PREFIX:-opd_qwen3base_nothink_teacher_prefix128_sftprefix_suffix_opd_n${N_RESPONSES}_lr${LR}_coef${TEACHER_PREFIX_SFT_LOSS_COEF}}
 else
     echo "Unsupported RUN_MODE=${RUN_MODE}; expected plain or prefix." >&2
     exit 1
@@ -153,7 +154,7 @@ TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B-RL
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B
 # export ACTOR_MODEL_PATH=model/Qwen2.5-Math-1.5B
-export ACTOR_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-Base
+export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-Base}
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B-step_0400
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-SFT
@@ -174,7 +175,7 @@ export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
 # export REWARD_MODEL_PATH=model/Skywork-OR1-Math-7B
 # export REWARD_MODEL_PATH=model/Polaris-4B-Preview
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-14B
-export REWARD_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base
+export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base}
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
 export PROJECT_PATH=checkpoint
@@ -211,10 +212,13 @@ fi
 PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((MAX_PROMPT_LENGTH + MAX_RESP_LENGTH) > 32768) ? (MAX_PROMPT_LENGTH + MAX_RESP_LENGTH) : 32768))
 export ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 export ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.9}
+export REWARD_MICRO_BATCH_SIZE_PER_GPU=${REWARD_MICRO_BATCH_SIZE_PER_GPU:-24}
+export EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-31744}
+export EVAL_OUTPUT_DIR=${EVAL_OUTPUT_DIR:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_31744}
 if [ ! -f "${TRAIN_DATASET}" ]; then
     echo "Missing training dataset: ${TRAIN_DATASET}" >&2
     if [ "$RUN_MODE" = "prefix" ]; then
-        echo "Generate it first with scripts/teacher_prefix/run_qwen3_base_teacher_prefix128_4gpu.sh" >&2
+        echo "Generate it first with ${TEACHER_PREFIX_GENERATION_SCRIPT}" >&2
     fi
     exit 1
 fi
@@ -330,7 +334,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=False \
     +reward_model.model.dtype=$MODEL_DTYPE \
-    reward_model.micro_batch_size_per_gpu=24 \
+    reward_model.micro_batch_size_per_gpu=$REWARD_MICRO_BATCH_SIZE_PER_GPU \
     custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
     custom_reward_function.name=reward_func \
     trainer.val_before_train=False \
@@ -373,7 +377,7 @@ fi
 CKPT_DIR="${CKPT_PATH}/global_step_${STEP}/actor"
 MODEL_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/${MODEL_OUTPUT_NAME_PREFIX}_step${STEP}"
 DATA_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data"
-OUTPUT_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_31744"
+OUTPUT_DIR="${EVAL_OUTPUT_DIR}"
 EVAL_DIR="${OUTPUT_DIR}/$(basename "${MODEL_DIR}")"
 
 echo "Using checkpoint: ${CKPT_DIR}"
@@ -403,7 +407,7 @@ python scripts/val/eval/gen_vllm.py \
     --output-dir "${OUTPUT_DIR}" \
     --tasks AIME24,AIME25,AMC23 \
     --n 16 \
-    --max-tokens 31744 \
+    --max-tokens "$EVAL_MAX_TOKENS" \
     --temperature 0.7 \
     --top-p 0.95 \
     --gpus "$EVAL_GPUS" \

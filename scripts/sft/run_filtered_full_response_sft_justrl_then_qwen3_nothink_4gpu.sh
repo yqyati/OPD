@@ -50,11 +50,17 @@ run_filtered_full_sft_stage() {
         exit 1
     fi
 
-    echo "========== Filter correct teacher responses: ${stage_name} =========="
-    python scripts/sft/filter_teacher_response_correct.py \
-        --input "$response_data" \
-        --output "$filtered_response_data" \
-        --response-column teacher_response_text
+    if [ -f "$filtered_response_data" ] && [ "${FORCE_REFILTER:-0}" != "1" ]; then
+        echo "========== Reuse filtered teacher responses: ${stage_name} =========="
+        echo "Filtered data already exists: ${filtered_response_data}"
+        echo "Set FORCE_REFILTER=1 to rebuild it."
+    else
+        echo "========== Filter correct teacher responses: ${stage_name} =========="
+        python scripts/sft/filter_teacher_response_correct.py \
+            --input "$response_data" \
+            --output "$filtered_response_data" \
+            --response-column teacher_response_text
+    fi
 
     echo "========== Run filtered full-response SFT: ${stage_name} =========="
     ACTOR_MODEL_PATH="$student_model" \

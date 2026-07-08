@@ -317,7 +317,7 @@ Results:
 | Full OPD all-data n=4 | 0.466667 | 0.318750 | 0.878125 | 0.554514 |
 | TeacherPrefix128 + suffix OPD n=1 | 0.439583 | 0.356250 | 0.834375 | 0.543403 |
 | TeacherPrefix256 + suffix OPD n=1 | 0.429167 | 0.331250 | 0.846875 | 0.535764 |
-| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+| Our method: TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
 
 Detailed eval metrics for the SFT-prefix run:
 
@@ -563,7 +563,9 @@ This table consolidates the completed DeepSeek/JustRL and Qwen3 ablations.
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix256 + suffix OPD n=1 | none | suffix after teacher prefix context | 0.429167 | 0.331250 | 0.846875 | 0.535764 |
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 pure SFT | teacher prefix 128 | none | 0.279167 | 0.187500 | 0.595313 | 0.353993 |
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Full-response SFT | full teacher response | none | 0.089583 | 0.081250 | 0.428125 | 0.199653 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Filtered full-response SFT | correct full teacher response | none | 0.081250 | 0.068750 | 0.428125 | 0.192708 |
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 pure SFT init + plain OPD n=1 | teacher prefix 128 as init | full student rollout | 0.441667 | 0.327083 | 0.832812 | 0.533854 |
+| DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | Batch mixed full-SFT + plain OPD | full teacher response on half batch | full student rollout on half batch | 0.445833 | 0.327083 | 0.820312 | 0.531076 |
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix128 + SFT(prefix, 0.2) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.464583 | 0.339583 | 0.812500 | 0.538889 |
 | DeepSeek/JustRL | DeepSeek-R1-Distill-Qwen-1.5B | JustRL-DeepSeek-1.5B | TeacherPrefix256 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 256 | suffix after teacher prefix context | 0.431250 | 0.337500 | 0.850000 | 0.539583 |
@@ -574,8 +576,46 @@ This table consolidates the completed DeepSeek/JustRL and Qwen3 ablations.
 | Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | Plain OPD n=1 | none | full student rollout | 0.052083 | 0.029167 | 0.239063 | 0.106771 |
 | Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | TeacherPrefix128 pure SFT | teacher prefix 128 | none | 0.050000 | 0.029167 | 0.282813 | 0.120660 |
 | Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | Full-response SFT | full teacher response | none | 0.018750 | 0.006250 | 0.165625 | 0.063542 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | Filtered full-response SFT | correct full teacher response | none | 0.066667 | 0.025000 | 0.315625 | 0.135764 |
 | Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | TeacherPrefix128 pure SFT init + plain OPD n=1 | teacher prefix 128 as init | full student rollout | 0.050000 | 0.031250 | 0.251563 | 0.110938 |
+| Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | Batch mixed full-SFT + plain OPD | full teacher response on half batch | full student rollout on half batch | 0.045833 | 0.035417 | 0.245313 | 0.108854 |
 | Qwen3 | Qwen3-1.7B-Base | Qwen3-4B-Base no-think | TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD n=1 | teacher prefix 128 | suffix after teacher prefix context | 0.060417 | 0.045833 | 0.350000 | 0.152083 |
+
+### Split By Student-Teacher Pair
+
+The original consolidated table above is kept unchanged. The same rows are split below by student-teacher pair for easier comparison within each setting.
+
+#### DeepSeek-R1-Distill-Qwen-1.5B student + JustRL-DeepSeek-1.5B teacher
+
+| Method | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.450000 | 0.337500 | 0.832812 | 0.540104 |
+| TeacherPrefix128 pure SFT | 0.279167 | 0.187500 | 0.595313 | 0.353993 |
+| Full-response SFT | 0.089583 | 0.081250 | 0.428125 | 0.199653 |
+| Filtered full-response SFT | 0.081250 | 0.068750 | 0.428125 | 0.192708 |
+| TeacherPrefix128 pure SFT init + plain OPD | 0.441667 | 0.327083 | 0.832812 | 0.533854 |
+| Batch mixed full-SFT + plain OPD | 0.445833 | 0.327083 | 0.820312 | 0.531076 |
+| Our method: TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.495833 | 0.325000 | 0.831250 | 0.550694 |
+
+#### Qwen3-1.7B-Base student + Qwen3-4B-Base-GRPO teacher
+
+| Method | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.062500 | 0.056250 | 0.425000 | 0.181250 |
+| TeacherPrefix128 pure SFT | 0.052083 | 0.056250 | 0.350000 | 0.152778 |
+| Our method: TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.118750 | 0.085417 | 0.468750 | 0.224306 |
+
+#### Qwen3-1.7B-Base student + Qwen3-4B-Base no-think teacher
+
+| Method | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.052083 | 0.029167 | 0.239063 | 0.106771 |
+| TeacherPrefix128 pure SFT | 0.050000 | 0.029167 | 0.282813 | 0.120660 |
+| Full-response SFT | 0.018750 | 0.006250 | 0.165625 | 0.063542 |
+| Filtered full-response SFT | 0.066667 | 0.025000 | 0.315625 | 0.135764 |
+| TeacherPrefix128 pure SFT init + plain OPD | 0.050000 | 0.031250 | 0.251563 | 0.110938 |
+| Batch mixed full-SFT + plain OPD | 0.045833 | 0.035417 | 0.245313 | 0.108854 |
+| Our method: TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.060417 | 0.045833 | 0.350000 | 0.152083 |
 
 Key comparisons:
 
@@ -584,6 +624,8 @@ Key comparisons:
 | DeepSeek/JustRL | Prefix128 pure SFT - Full OPD n=1 | -0.170833 | -0.150000 | -0.237499 | -0.186111 |
 | DeepSeek/JustRL | Full-response SFT - Full OPD n=1 | -0.360417 | -0.256250 | -0.404687 | -0.340451 |
 | DeepSeek/JustRL | Prefix128 pure SFT init + plain OPD - Full OPD n=1 | -0.008333 | -0.010417 | +0.000000 | -0.006250 |
+| DeepSeek/JustRL | Batch mixed full-SFT + plain OPD - Full OPD n=1 | -0.004167 | -0.010417 | -0.012500 | -0.009028 |
+| DeepSeek/JustRL | Prefix128 SFT(0.1)+suffix OPD - Batch mixed full-SFT + plain OPD | +0.050000 | -0.002083 | +0.010938 | +0.019618 |
 | DeepSeek/JustRL | Prefix128 SFT(0.1)+suffix OPD - Full OPD n=1 | +0.045833 | -0.012500 | -0.001562 | +0.010590 |
 | DeepSeek/JustRL | Prefix128 SFT(0.1)+suffix OPD - Prefix128 pure SFT | +0.216666 | +0.137500 | +0.235937 | +0.196701 |
 | Qwen3 GRPO teacher | Prefix128 pure SFT - Plain OPD | -0.010417 | +0.000000 | -0.075000 | -0.028472 |
@@ -592,6 +634,8 @@ Key comparisons:
 | Qwen3 no-think teacher | Prefix128 pure SFT - Plain OPD | -0.002083 | +0.000000 | +0.043750 | +0.013889 |
 | Qwen3 no-think teacher | Full-response SFT - Plain OPD | -0.033333 | -0.022917 | -0.073438 | -0.043229 |
 | Qwen3 no-think teacher | Prefix128 pure SFT init + plain OPD - Plain OPD | -0.002083 | +0.002083 | +0.012500 | +0.004167 |
+| Qwen3 no-think teacher | Batch mixed full-SFT + plain OPD - Plain OPD | -0.006250 | +0.006250 | +0.006250 | +0.002083 |
+| Qwen3 no-think teacher | Prefix128 SFT(0.1)+suffix OPD - Batch mixed full-SFT + plain OPD | +0.014584 | +0.010416 | +0.104687 | +0.043229 |
 | Qwen3 no-think teacher | Prefix128 SFT(0.1)+suffix OPD - Plain OPD | +0.008334 | +0.016666 | +0.110937 | +0.045312 |
 | Qwen3 no-think teacher | Prefix128 SFT(0.1)+suffix OPD - Prefix128 pure SFT | +0.010417 | +0.016666 | +0.067187 | +0.031423 |
 
@@ -606,3 +650,36 @@ Summary:
 - Qwen3 GRPO teacher is substantially stronger than Qwen3 no-think base teacher.
 - The current best DeepSeek/JustRL n=1 result is `TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD`, Avg `0.550694`.
 - The current best Qwen3 result is `Qwen3-4B-Base-GRPO TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD`, Avg `0.224306`.
+
+### Mechanism Insight: Raw Top-K Overlap Is Not Enough
+
+The Qwen3 no-think setting provides the clearest mechanism case study. Prior OPD analysis emphasizes top-k overlap as a condition for effective distillation: teacher guidance should lie in the student's locally reachable support. Our diagnostics suggest a sharper condition:
+
+`Top-k overlap measures whether the teacher signal is locally accessible, but intersection probability mass measures whether it is actually learnable.`
+
+In the Qwen3 no-think run, plain OPD has higher raw top-k overlap than our method, but much lower probability mass on the overlapped support:
+
+| Method | Top-k overlap last | Student p-mass on intersection last | Teacher p-mass on intersection last | Eval Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.7927 | 0.3465 | 0.3625 | 0.106771 |
+| Our method: TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.5782 | 0.9021 | 0.9041 | 0.152083 |
+
+Interpretation:
+
+- Raw top-k overlap is a set-level metric: it asks how many candidate tokens appear in both the student and teacher top-k lists.
+- Intersection p-mass is a probability-mass metric: it asks how much probability both models assign to the shared candidate region.
+- Plain OPD has many overlapping candidate tokens, but those overlapping tokens carry only about 35% of each model's probability mass. This means the apparent support overlap is not where either model places most of its confidence.
+- Our method has lower raw overlap, but the overlapping support carries about 90% of both student and teacher probability mass. This indicates a smaller but much more important shared teachable region.
+- Therefore, the gain is not simply from increasing teacher-student top-k overlap. Teacher-prefix conditioning reshapes the student suffix trajectory so that the high-probability regions of teacher and student concentrate on a shared teachable support.
+
+This extends the overlap insight in Rethinking OPD:
+
+`OPD is effective when teacher and student concentrate probability mass on a shared high-probability support, not merely when their top-k supports overlap.`
+
+Suggested paper wording:
+
+`Prior work has emphasized top-k overlap as a prerequisite for effective OPD, arguing that teacher guidance must lie within the student's locally reachable support. We find that this condition is not sufficient. In our Qwen3 no-think setting, plain OPD exhibits higher raw top-k overlap than our method, yet assigns only a small fraction of both student and teacher probability mass to the overlapped support. In contrast, teacher-prefix conditioning yields lower raw overlap but concentrates over 90% of both policies' probability mass on the shared support, leading to substantially better downstream accuracy. This suggests that the key determinant is not raw support overlap, but shared high-probability support.`
+
+Related reward-curve figure:
+
+`analysis_plots/qwen3_nothink_reward_curves.png`

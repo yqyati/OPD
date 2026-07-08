@@ -105,6 +105,7 @@ if [ -z "${TEACHER_PREFIX_SFT_LOSS_COEF+x}" ]; then
         export TEACHER_PREFIX_SFT_LOSS_COEF=0.0
     fi
 fi
+export TEACHER_PREFIX_SOFT_KL_LOSS_COEF=${TEACHER_PREFIX_SOFT_KL_LOSS_COEF:-0.0}
 
 # TODO: qwen3_1p7b_base / qwen3_1p7b / llama31_8b_base / llama31_8b_inst / qwen3_8b_base / qwen3_8b / qwen25_1p5b_base / qwen25_1p5b_inst / qwen25_7b_base / qwen25_7b_inst / qwen25_math_7b_base / qwen25_math_7b_inst / qwen25_math_1p5b_base / qwen25_math_1p5b_inst / distill_r1_1p5b / olmo2_1124_7b_base / olmo2_1124_7b_sft / olmo2_1124_7b_inst / llama32_3b_inst
 # export EXPERIMENT_NAME=grpo_${TASK}_llama31_tulu3_8b_sft_8k-T_${TEMPERATURE}-n_${N_RESPONSES}-kl_${USE_KL}-mbs_${MINI_BATCH_SIZE}-${REWARD_TYPE}-$(date +%Y-%m-%d_%H-%M-%S)
@@ -120,13 +121,13 @@ fi
 # export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math_part2.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/verl_format/train.parquet
 if [ "$RUN_MODE" = "plain" ]; then
-    export TRAIN_DATASET=datasets/dapo-math-17k-teacher-aligned.parquet
-    export TRAIN_DATASET_NAME=Qwen3NoThink-PrefixSFTInit-PlainOPD-n1
-    export MODEL_OUTPUT_NAME_PREFIX=opd_qwen3base_nothink_teacher_prefix_sft_init_plain_opd_n${N_RESPONSES}_lr${LR}
+    export TRAIN_DATASET=${TRAIN_DATASET:-datasets/dapo-math-17k-teacher-aligned.parquet}
+    export TRAIN_DATASET_NAME=${TRAIN_DATASET_NAME:-Qwen3NoThink-PrefixSFTInit-PlainOPD-n1}
+    export MODEL_OUTPUT_NAME_PREFIX=${MODEL_OUTPUT_NAME_PREFIX:-opd_qwen3base_nothink_teacher_prefix_sft_init_plain_opd_n${N_RESPONSES}_lr${LR}}
 elif [ "$RUN_MODE" = "prefix" ]; then
-    export TRAIN_DATASET=datasets/teacher_prefix/qwen3_base_dapo_math_17k_teacher_prefix128.parquet
-    export TRAIN_DATASET_NAME=DAPO-Math-17k-Qwen3Base-NoThinkTeacherPrefix128-SFTPrefix-SuffixOPD-n1
-    export MODEL_OUTPUT_NAME_PREFIX=opd_qwen3base_nothink_teacher_prefix128_sftprefix_suffix_opd_n${N_RESPONSES}_lr${LR}_coef${TEACHER_PREFIX_SFT_LOSS_COEF}
+    export TRAIN_DATASET=${TRAIN_DATASET:-datasets/teacher_prefix/qwen3_base_dapo_math_17k_teacher_prefix128.parquet}
+    export TRAIN_DATASET_NAME=${TRAIN_DATASET_NAME:-DAPO-Math-17k-Qwen3Base-NoThinkTeacherPrefix128-SFTPrefix-SuffixOPD-n1}
+    export MODEL_OUTPUT_NAME_PREFIX=${MODEL_OUTPUT_NAME_PREFIX:-opd_qwen3base_nothink_teacher_prefix128_sftprefix_suffix_opd_n${N_RESPONSES}_lr${LR}_coef${TEACHER_PREFIX_SFT_LOSS_COEF}}
 else
     echo "Unsupported RUN_MODE=${RUN_MODE}; expected plain or prefix." >&2
     exit 1
@@ -153,7 +154,7 @@ TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B-RL
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B
 # export ACTOR_MODEL_PATH=model/Qwen2.5-Math-1.5B
-export ACTOR_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/qwen3_nothink_teacher_prefix128_pure_sft_lr1e-5_step279
+export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/qwen3_nothink_teacher_prefix128_pure_sft_lr1e-5_step279}
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B-step_0400
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-SFT
@@ -164,7 +165,7 @@ export ACTOR_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/mer
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-sft/checkpoint-6000
 # export ACTOR_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-7B
 # export ACTOR_MODEL_PATH=model/DS-1.5B-SFT
-export ACTOR_MODEL_NAME=qwen3_nothink_prefix_sft_init
+export ACTOR_MODEL_NAME=${ACTOR_MODEL_NAME:-qwen3_nothink_prefix_sft_init}
 # export REWARD_MODEL_PATH=model/Qwen3-4B
 # export REWARD_MODEL_PATH=model/Qwen3-4B-grpo
 # export REWARD_MODEL_PATH=model/Qwen3-1.7B
@@ -174,13 +175,13 @@ export ACTOR_MODEL_NAME=qwen3_nothink_prefix_sft_init
 # export REWARD_MODEL_PATH=model/Skywork-OR1-Math-7B
 # export REWARD_MODEL_PATH=model/Polaris-4B-Preview
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-14B
-export REWARD_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base
-export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
+export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base}
+export REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-$(basename "$REWARD_MODEL_PATH")}
 
 export PROJECT_PATH=checkpoint
 export PARALLEL_SIZE=1
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
-export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
+export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-softkl_${TEACHER_PREFIX_SOFT_KL_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
 
@@ -191,7 +192,7 @@ export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 export HYDRA_FULL_ERROR=1
 
 
-export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
+export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-softkl_${TEACHER_PREFIX_SOFT_KL_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 
 KL_ARGS=""
 if [ "$USE_KL" = "True" ]; then
@@ -294,6 +295,7 @@ python3 -m verl.trainer.main_ppo \
     $KL_ARGS \
     actor_rollout_ref.actor.loss_agg_mode=$LOSS_AGG_MODE \
     +actor_rollout_ref.actor.teacher_prefix_sft_loss_coef=$TEACHER_PREFIX_SFT_LOSS_COEF \
+    +actor_rollout_ref.actor.teacher_prefix_soft_kl_loss_coef=$TEACHER_PREFIX_SOFT_KL_LOSS_COEF \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \

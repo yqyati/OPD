@@ -91,6 +91,7 @@ class DataParallelPPOActor(BasePPOActor):
         top_k=0,
         student_top_k_ids=None,
         return_full_log_probs=False,
+        full_target_ids=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -115,6 +116,20 @@ class DataParallelPPOActor(BasePPOActor):
             topk_ids = None
             topk_log_probs = None
             full_log_probs_for_return = None
+            full_target_log_probs_for_return = None
+            if full_target_ids is not None and full_target_ids.shape[1] != seqlen:
+                if full_target_ids.shape[1] > seqlen:
+                    raise RuntimeError(
+                        f"full_target_ids is longer than full sequence length {seqlen}, "
+                        f"got {full_target_ids.shape=}"
+                    )
+                padded_full_target_ids = torch.zeros(
+                    (full_target_ids.shape[0], seqlen, full_target_ids.shape[-1]),
+                    dtype=full_target_ids.dtype,
+                    device=full_target_ids.device,
+                )
+                padded_full_target_ids[:, : full_target_ids.shape[1], :] = full_target_ids
+                full_target_ids = padded_full_target_ids
             
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
@@ -188,7 +203,8 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
                 
-                need_logits = top_k > 0
+                need_full_target_log_probs = full_target_ids is not None
+                need_logits = top_k > 0 or need_full_target_log_probs
 
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -207,7 +223,7 @@ class DataParallelPPOActor(BasePPOActor):
                     # log_probs and topk_log_probs to avoid duplicate computation and gradient
                     # issues from inplace operations
                     need_topk = top_k > 0
-                    if need_topk:
+                    if need_topk or need_full_target_log_probs:
                         # Compute log_softmax once for both target and topk tokens
                         # Note: we don't use inplace_backward here to ensure correct gradients
                         # when both log_probs and topk_log_probs are needed
@@ -276,6 +292,11 @@ class DataParallelPPOActor(BasePPOActor):
 
                         # Use pre-computed log_probs_all (always available when need_topk=True)
                         topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
+                    if need_full_target_log_probs:
+                        full_target_ids_local = full_target_ids
+                        flat_full_target_ids = full_target_ids_local.view(-1, full_target_ids_local.shape[-1])
+                        full_target_ids_rmpad = flat_full_target_ids[indices]
+                        full_target_log_probs = log_probs_all.gather(dim=-1, index=full_target_ids_rmpad)
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -304,8 +325,15 @@ class DataParallelPPOActor(BasePPOActor):
                             topk_log_probs,
                             gather_dim=0,
                             unpad_dim=0,
-                            padding_size=pad_size,
+                             padding_size=pad_size,
                          )
+                    if need_full_target_log_probs:
+                        full_target_log_probs = gather_outputs_and_unpad(
+                            full_target_log_probs,
+                            gather_dim=0,
+                            unpad_dim=0,
+                            padding_size=pad_size,
+                        )
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
                     full_entropy = pad_input(
@@ -330,6 +358,13 @@ class DataParallelPPOActor(BasePPOActor):
                     )
                     full_topk_log_probs = pad_input(
                         hidden_states=topk_log_probs,
+                        indices=indices,
+                        batch=batch_size,
+                        seqlen=seqlen,
+                    )
+                if need_full_target_log_probs:
+                    full_target_log_probs_for_return = pad_input(
+                        hidden_states=full_target_log_probs,
                         indices=indices,
                         batch=batch_size,
                         seqlen=seqlen,
@@ -360,7 +395,8 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
                 
-                need_logits = top_k > 0
+                need_full_target_log_probs = full_target_ids is not None
+                need_logits = top_k > 0 or need_full_target_log_probs
                 if self.use_fused_kernels and not need_logits:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
@@ -401,6 +437,9 @@ class DataParallelPPOActor(BasePPOActor):
                         
                         # Use pre-computed log_probs_all (always available when need_topk=True)
                         topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
+                    if need_full_target_log_probs:
+                        full_log_probs_all = torch.log_softmax(logits, dim=-1)
+                        full_target_log_probs_for_return = full_log_probs_all.gather(dim=-1, index=full_target_ids)
 
                     if return_full_log_probs:
                         shifted_logits = logits[:, :-1, :]
@@ -409,8 +448,12 @@ class DataParallelPPOActor(BasePPOActor):
                         full_log_probs_for_return = torch.zeros_like(input_ids, dtype=shifted_log_probs.dtype)
                         full_log_probs_for_return[:, :-1] = shifted_log_probs
 
+            if return_full_log_probs and full_target_ids is not None:
+                return entropy, log_probs, topk_ids, topk_log_probs, full_log_probs_for_return, full_target_log_probs_for_return
             if return_full_log_probs:
                 return entropy, log_probs, topk_ids, topk_log_probs, full_log_probs_for_return
+            if full_target_ids is not None:
+                return entropy, log_probs, topk_ids, topk_log_probs, full_target_log_probs_for_return
             return entropy, log_probs, topk_ids, topk_log_probs
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -773,12 +816,27 @@ class DataParallelPPOActor(BasePPOActor):
         if "format_mask" in data.batch.keys():
             select_keys.append("format_mask") # (bsz, 1)
 
+        if "opd_loss_mask" in data.batch.keys():
+            select_keys.append("opd_loss_mask")
+
         teacher_prefix_sft_loss_coef = self.config.get("teacher_prefix_sft_loss_coef", 0.0)
         use_teacher_prefix_sft = (
             teacher_prefix_sft_loss_coef > 0 and "teacher_prefix_sft_mask" in data.batch.keys()
         )
         if use_teacher_prefix_sft:
             select_keys.append("teacher_prefix_sft_mask")
+
+        teacher_prefix_soft_kl_loss_coef = self.config.get("teacher_prefix_soft_kl_loss_coef", 0.0)
+        use_teacher_prefix_soft_kl = (
+            teacher_prefix_soft_kl_loss_coef > 0
+            and "teacher_prefix_sft_mask" in data.batch.keys()
+            and "teacher_prefix_top_k_ids" in data.batch.keys()
+            and "teacher_prefix_top_k_log_probs" in data.batch.keys()
+        )
+        if use_teacher_prefix_soft_kl:
+            if "teacher_prefix_sft_mask" not in select_keys:
+                select_keys.append("teacher_prefix_sft_mask")
+            select_keys.extend(["teacher_prefix_top_k_ids", "teacher_prefix_top_k_log_probs"])
         
         # Include student_top_k_log_probs if present (for top-k distillation)
         if "student_top_k_log_probs" in data.batch.keys():
@@ -833,6 +891,9 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
+                    if "opd_loss_mask" in model_inputs:
+                        opd_loss_mask = model_inputs["opd_loss_mask"].to(response_mask.dtype)
+                        response_mask = response_mask * opd_loss_mask.view(-1, 1)
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
@@ -849,6 +910,10 @@ class DataParallelPPOActor(BasePPOActor):
                     if entropy_coeff != 0:
                         calculate_entropy = True
                     full_log_probs = None
+                    teacher_prefix_student_top_k_log_probs = None
+                    teacher_prefix_full_target_ids = (
+                        model_inputs.get("teacher_prefix_top_k_ids", None) if use_teacher_prefix_soft_kl else None
+                    )
                     
                     # Check if we have 3D advantages (top-k sampling case)
                     # If so, we need to recompute top-k log probs for correct gradient
@@ -865,9 +930,14 @@ class DataParallelPPOActor(BasePPOActor):
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                             top_k=top_k, student_top_k_ids=student_top_k_ids,
                             return_full_log_probs=use_teacher_prefix_sft,
+                            full_target_ids=teacher_prefix_full_target_ids,
                         )
-                        if use_teacher_prefix_sft:
+                        if use_teacher_prefix_sft and use_teacher_prefix_soft_kl:
+                            entropy, _, _, topk_log_probs, full_log_probs, teacher_prefix_student_top_k_log_probs = forward_outputs
+                        elif use_teacher_prefix_sft:
                             entropy, _, _, topk_log_probs, full_log_probs = forward_outputs
+                        elif use_teacher_prefix_soft_kl:
+                            entropy, _, _, topk_log_probs, teacher_prefix_student_top_k_log_probs = forward_outputs
                         else:
                             entropy, _, _, topk_log_probs = forward_outputs
                         log_prob_for_loss = topk_log_probs
@@ -878,9 +948,14 @@ class DataParallelPPOActor(BasePPOActor):
                             temperature=temperature,
                             calculate_entropy=calculate_entropy,
                             return_full_log_probs=use_teacher_prefix_sft,
+                            full_target_ids=teacher_prefix_full_target_ids,
                         )
-                        if use_teacher_prefix_sft:
+                        if use_teacher_prefix_sft and use_teacher_prefix_soft_kl:
+                            _, log_prob, *_, full_log_probs, teacher_prefix_student_top_k_log_probs = forward_outputs
+                        elif use_teacher_prefix_sft:
                             _, log_prob, *_, full_log_probs = forward_outputs
+                        elif use_teacher_prefix_soft_kl:
+                            _, log_prob, *_, teacher_prefix_student_top_k_log_probs = forward_outputs
                         else:
                             _, log_prob, *_ = forward_outputs
                         log_prob_for_loss = log_prob
@@ -966,6 +1041,67 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_prefix_sft_loss.detach().item() * loss_scale_factor
                         )
                         micro_batch_metrics["actor/teacher_prefix_sft_loss_coef"] = teacher_prefix_sft_loss_coef
+
+                    if use_teacher_prefix_soft_kl:
+                        teacher_prefix_soft_kl_mask = model_inputs["teacher_prefix_sft_mask"].to(
+                            teacher_prefix_student_top_k_log_probs.dtype
+                        )
+                        teacher_prefix_top_k_log_probs = model_inputs["teacher_prefix_top_k_log_probs"].to(
+                            teacher_prefix_student_top_k_log_probs.dtype
+                        )
+                        if teacher_prefix_soft_kl_mask.shape[-1] != teacher_prefix_student_top_k_log_probs.shape[1]:
+                            full_soft_kl_mask = torch.zeros(
+                                teacher_prefix_student_top_k_log_probs.shape[:2],
+                                dtype=teacher_prefix_student_top_k_log_probs.dtype,
+                                device=teacher_prefix_student_top_k_log_probs.device,
+                            )
+                            prompt_mask_len = teacher_prefix_soft_kl_mask.shape[-1]
+                            full_soft_kl_mask[:, :prompt_mask_len] = teacher_prefix_soft_kl_mask
+                            teacher_prefix_soft_kl_mask = full_soft_kl_mask
+                        if teacher_prefix_top_k_log_probs.shape[1] != teacher_prefix_student_top_k_log_probs.shape[1]:
+                            full_teacher_prefix_top_k_log_probs = torch.zeros_like(
+                                teacher_prefix_student_top_k_log_probs
+                            )
+                            prompt_target_len = teacher_prefix_top_k_log_probs.shape[1]
+                            full_teacher_prefix_top_k_log_probs[:, :prompt_target_len, :] = (
+                                teacher_prefix_top_k_log_probs
+                            )
+                            teacher_prefix_top_k_log_probs = full_teacher_prefix_top_k_log_probs
+
+                        token_mask = teacher_prefix_soft_kl_mask > 0
+                        safe_teacher_logp = torch.where(
+                            token_mask.unsqueeze(-1),
+                            teacher_prefix_top_k_log_probs,
+                            torch.zeros_like(teacher_prefix_top_k_log_probs),
+                        )
+                        safe_student_logp = torch.where(
+                            token_mask.unsqueeze(-1),
+                            teacher_prefix_student_top_k_log_probs,
+                            torch.zeros_like(teacher_prefix_student_top_k_log_probs),
+                        )
+                        teacher_logp_norm = safe_teacher_logp - torch.logsumexp(
+                            safe_teacher_logp, dim=-1, keepdim=True
+                        )
+                        student_logp_norm = safe_student_logp - torch.logsumexp(
+                            safe_student_logp, dim=-1, keepdim=True
+                        )
+                        teacher_probs = torch.exp(teacher_logp_norm)
+                        prefix_soft_kl_per_token = torch.sum(
+                            teacher_probs * (teacher_logp_norm - student_logp_norm), dim=-1
+                        )
+                        if teacher_prefix_soft_kl_mask.sum() > 0:
+                            teacher_prefix_soft_kl_loss = verl_F.masked_mean(
+                                prefix_soft_kl_per_token, teacher_prefix_soft_kl_mask
+                            )
+                        else:
+                            teacher_prefix_soft_kl_loss = teacher_prefix_student_top_k_log_probs.sum() * 0.0
+                        policy_loss = policy_loss + teacher_prefix_soft_kl_loss_coef * teacher_prefix_soft_kl_loss
+                        micro_batch_metrics["actor/teacher_prefix_soft_kl_loss"] = (
+                            teacher_prefix_soft_kl_loss.detach().item() * loss_scale_factor
+                        )
+                        micro_batch_metrics["actor/teacher_prefix_soft_kl_loss_coef"] = (
+                            teacher_prefix_soft_kl_loss_coef
+                        )
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]
