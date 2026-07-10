@@ -349,7 +349,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=-1 \
     trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.default_local_dir="$CKPT_PATH" \
-    trainer.is_plot=$IS_PLOT
+    trainer.is_plot=$IS_PLOT \
+    ${EXTRA_PPO_ARGS:-}
 TRAIN_EXIT=$?
 set -e
 

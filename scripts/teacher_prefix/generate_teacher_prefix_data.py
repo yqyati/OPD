@@ -33,6 +33,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--top-k-logprobs",
+        type=int,
+        default=0,
+        help="If >0, ask vLLM to return top-k logprobs for each generated prefix token and store them.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N rows for smoke tests.")
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing output parquet.")
@@ -62,6 +68,32 @@ def load_completed(temp_jsonl: Path) -> dict[int, dict]:
             if isinstance(idx, int):
                 completed[idx] = record
     return completed
+
+
+def extract_topk_logprobs(generated, top_k: int) -> tuple[list[list[int]], list[list[float]]]:
+    """Extract vLLM per-step top-k logprobs into JSON-serializable lists."""
+    if top_k <= 0:
+        return [], []
+    logprobs = getattr(generated, "logprobs", None)
+    if not logprobs:
+        return [], []
+
+    all_ids: list[list[int]] = []
+    all_logp: list[list[float]] = []
+    for step_logprobs in logprobs:
+        if not step_logprobs:
+            all_ids.append([])
+            all_logp.append([])
+            continue
+        entries = []
+        for token_id, value in step_logprobs.items():
+            logprob = getattr(value, "logprob", value)
+            entries.append((int(token_id), float(logprob)))
+        entries.sort(key=lambda x: x[1], reverse=True)
+        entries = entries[:top_k]
+        all_ids.append([token_id for token_id, _ in entries])
+        all_logp.append([logprob for _, logprob in entries])
+    return all_ids, all_logp
 
 
 def main() -> None:
@@ -100,12 +132,15 @@ def main() -> None:
             gpu_memory_utilization=0.9,
         )
         tokenizer = llm.get_tokenizer()
-        sampling = SamplingParams(
+        sampling_kwargs = dict(
             n=1,
             temperature=args.temperature,
             top_p=args.top_p,
             max_tokens=args.max_new_tokens,
         )
+        if args.top_k_logprobs > 0:
+            sampling_kwargs["logprobs"] = args.top_k_logprobs
+        sampling = SamplingParams(**sampling_kwargs)
 
         with temp_jsonl.open("a", encoding="utf-8") as f_out:
             for start in range(0, len(pending), args.batch_size):
@@ -122,6 +157,7 @@ def main() -> None:
                 outputs = llm.generate(prompts, sampling)
                 for idx, output in zip(batch_indices, outputs, strict=True):
                     generated = output.outputs[0]
+                    topk_ids, topk_logp = extract_topk_logprobs(generated, args.top_k_logprobs)
                     record = {
                         "__teacher_prefix_row_id": idx,
                         "teacher_prefix_text": generated.text,
@@ -132,6 +168,9 @@ def main() -> None:
                         "teacher_prefix_temperature": args.temperature,
                         "teacher_prefix_top_p": args.top_p,
                     }
+                    if args.top_k_logprobs > 0:
+                        record["teacher_prefix_top_k_ids"] = topk_ids
+                        record["teacher_prefix_top_k_log_probs"] = topk_logp
                     f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f_out.flush()
                 done = min(start + len(batch_indices), len(pending))

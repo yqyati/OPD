@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument("--enable-thinking", action="store_true")
     return parser.parse_args()
 
 
@@ -70,7 +71,12 @@ def main() -> None:
             continue
 
         messages = normalize_prompt(row["prompt"])
-        base_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        base_prompt = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=args.enable_thinking,
+        )
         raw_prompt = base_prompt + teacher_prefix
         base_ids = tokenizer.encode(base_prompt, add_special_tokens=False)
         full_ids = tokenizer.encode(raw_prompt, add_special_tokens=False)

@@ -537,6 +537,158 @@ class RayPPOTrainer:
 
         return gen_batch
 
+    def _online_prefix_selection_enabled(self) -> bool:
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        online_cfg = rollout_cfg.get("online_prefix_selection", None)
+        return bool(online_cfg is not None and online_cfg.get("enable", False))
+
+    def _apply_online_prefix_selection(self, batch: DataProto, selection: DataProto, metrics: dict) -> None:
+        """Trim full teacher prefixes to online-selected lengths before rollout.
+
+        The dataloader builds prompts with the full cached teacher prefix. This
+        method keeps the base prompt plus the first selected prefix tokens, then
+        rebuilds left-padded prompt tensors and raw_prompt_ids used by vLLM.
+        """
+        if "teacher_prefix_sft_mask" not in batch.batch.keys():
+            raise RuntimeError("online prefix selection requires teacher_prefix_sft_mask in the batch.")
+
+        selected_lens = selection.batch["online_prefix_selected_len"].cpu()
+        input_ids = batch.batch["input_ids"].clone()
+        attention_mask = batch.batch["attention_mask"].clone()
+        teacher_prefix_sft_mask = batch.batch["teacher_prefix_sft_mask"].clone()
+        pad_token_id = self.tokenizer.pad_token_id
+        batch_size, max_len = input_ids.shape
+
+        has_topk = (
+            "teacher_prefix_top_k_ids" in batch.batch.keys()
+            and "teacher_prefix_top_k_log_probs" in batch.batch.keys()
+        )
+        if has_topk:
+            teacher_prefix_top_k_ids = batch.batch["teacher_prefix_top_k_ids"].clone()
+            teacher_prefix_top_k_log_probs = batch.batch["teacher_prefix_top_k_log_probs"].clone()
+        else:
+            teacher_prefix_top_k_ids = None
+            teacher_prefix_top_k_log_probs = None
+
+        raw_prompt_ids = batch.non_tensor_batch.get("raw_prompt_ids", None)
+        new_raw_prompt_ids = [] if raw_prompt_ids is not None else None
+        original_lens = []
+        clipped_lens = []
+
+        for row_idx in range(batch_size):
+            valid_positions = torch.nonzero(attention_mask[row_idx] > 0, as_tuple=False).flatten()
+            prefix_positions = torch.nonzero(teacher_prefix_sft_mask[row_idx] > 0, as_tuple=False).flatten()
+            if valid_positions.numel() == 0 or prefix_positions.numel() == 0:
+                if new_raw_prompt_ids is not None:
+                    new_raw_prompt_ids.append(list(raw_prompt_ids[row_idx]))
+                original_lens.append(0)
+                clipped_lens.append(0)
+                continue
+
+            prefix_len = int(prefix_positions.numel())
+            selected_len = int(max(0, min(int(selected_lens[row_idx].item()), prefix_len)))
+            original_lens.append(prefix_len)
+            clipped_lens.append(selected_len)
+
+            # teacher_prefix_sft_mask marks logits positions that predict prefix
+            # tokens. If its first position is base_len - 1, then keeping l
+            # prefix tokens means keeping input ids through first_pos + l.
+            first_prefix_logit_pos = int(prefix_positions[0].item())
+            keep_until = first_prefix_logit_pos + 1 + selected_len
+            first_valid = int(valid_positions[0].item())
+            kept_ids = input_ids[row_idx, first_valid:keep_until].clone()
+            kept_len = int(kept_ids.numel())
+
+            input_ids[row_idx].fill_(pad_token_id)
+            attention_mask[row_idx].zero_()
+            teacher_prefix_sft_mask[row_idx].zero_()
+            if has_topk:
+                teacher_prefix_top_k_ids[row_idx].zero_()
+                teacher_prefix_top_k_log_probs[row_idx].fill_(-float("inf"))
+
+            new_start = max_len - kept_len
+            input_ids[row_idx, new_start:] = kept_ids
+            attention_mask[row_idx, new_start:] = 1
+
+            if selected_len > 0:
+                old_selected_positions = prefix_positions[:selected_len]
+                # Shift kept prompt from [first_valid, keep_until) to [new_start, max_len).
+                shift = new_start - first_valid
+                new_prefix_positions = old_selected_positions + shift
+                teacher_prefix_sft_mask[row_idx, new_prefix_positions] = 1.0
+                if has_topk:
+                    teacher_prefix_top_k_ids[row_idx, new_prefix_positions] = batch.batch["teacher_prefix_top_k_ids"][
+                        row_idx, old_selected_positions
+                    ]
+                    teacher_prefix_top_k_log_probs[row_idx, new_prefix_positions] = batch.batch[
+                        "teacher_prefix_top_k_log_probs"
+                    ][row_idx, old_selected_positions]
+
+            if new_raw_prompt_ids is not None:
+                new_raw_prompt_ids.append([int(x) for x in kept_ids.cpu().tolist()])
+
+        batch.batch["input_ids"] = input_ids
+        batch.batch["attention_mask"] = attention_mask
+        if batch.batch["position_ids"].dim() == 2:
+            batch.batch["position_ids"] = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
+            batch.batch["position_ids"] = batch.batch["position_ids"] * attention_mask
+        batch.batch["teacher_prefix_sft_mask"] = teacher_prefix_sft_mask
+        if has_topk:
+            batch.batch["teacher_prefix_top_k_ids"] = teacher_prefix_top_k_ids
+            batch.batch["teacher_prefix_top_k_log_probs"] = teacher_prefix_top_k_log_probs
+        if new_raw_prompt_ids is not None:
+            batch.non_tensor_batch["raw_prompt_ids"] = np.array(new_raw_prompt_ids, dtype=object)
+
+        batch.batch["online_prefix_selected_len"] = selection.batch["online_prefix_selected_len"]
+        batch.batch["online_prefix_selected_score"] = selection.batch["online_prefix_selected_score"]
+        batch.batch["online_prefix_score_max"] = selection.batch["online_prefix_score_max"]
+        batch.batch["online_prefix_score_mean"] = selection.batch["online_prefix_score_mean"]
+
+        if original_lens:
+            metrics["online_prefix/original_len_mean"] = float(np.mean(original_lens))
+            metrics["online_prefix/selected_len_mean"] = float(np.mean(clipped_lens))
+            metrics["online_prefix/selected_len_min"] = float(np.min(clipped_lens))
+            metrics["online_prefix/selected_len_max"] = float(np.max(clipped_lens))
+            metrics["online_prefix/selected_score_mean"] = float(
+                selection.batch["online_prefix_selected_score"].float().mean().item()
+            )
+            metrics["online_prefix/score_max_mean"] = float(selection.batch["online_prefix_score_max"].float().mean().item())
+
+    def _maybe_apply_online_prefix_selection(self, batch: DataProto, metrics: dict, timing_raw: dict) -> None:
+        if not self._online_prefix_selection_enabled():
+            return
+        required = {
+            "teacher_prefix_sft_mask",
+            "teacher_prefix_top_k_ids",
+            "teacher_prefix_top_k_log_probs",
+        }
+        missing = required - set(batch.batch.keys())
+        if missing:
+            raise RuntimeError(
+                "online prefix selection requires cached teacher prefix top-k columns; "
+                f"missing batch keys: {sorted(missing)}"
+            )
+
+        online_cfg = self.config.actor_rollout_ref.rollout.get("online_prefix_selection")
+        score_batch = batch.select(
+            batch_keys=[
+                "input_ids",
+                "attention_mask",
+                "position_ids",
+                "teacher_prefix_sft_mask",
+                "teacher_prefix_top_k_ids",
+                "teacher_prefix_top_k_log_probs",
+            ]
+        )
+        score_batch.meta_info["online_prefix_smooth_window"] = online_cfg.get("smooth_window", 8)
+        score_batch.meta_info["online_prefix_min_prefix_len"] = online_cfg.get("min_prefix_len", 0)
+        score_batch.meta_info["online_prefix_selection_rule"] = online_cfg.get("selection_rule", "argmax")
+        score_batch.meta_info["online_prefix_threshold"] = online_cfg.get("threshold", 0.6)
+        score_batch.meta_info["online_prefix_fallback"] = online_cfg.get("fallback", "argmax")
+        with marked_timer("online_prefix", timing_raw, color="cyan"):
+            selection = self.actor_rollout_wg.compute_online_prefix_handoff(score_batch)
+        self._apply_online_prefix_selection(batch, selection, metrics)
+
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -1034,6 +1186,8 @@ class RayPPOTrainer:
                 batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
+
+                self._maybe_apply_online_prefix_selection(batch, metrics, timing_raw)
 
                 gen_batch = self._get_gen_batch(batch)
 

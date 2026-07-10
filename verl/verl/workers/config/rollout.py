@@ -27,6 +27,7 @@ __all__ = [
     "AgentLoopConfig",
     "TraceConfig",
     "ServerConfig",
+    "OnlinePrefixSelectionConfig",
     "RolloutConfig",
 ]
 
@@ -93,6 +94,16 @@ class ServerConfig(BaseConfig):
 
 
 @dataclass
+class OnlinePrefixSelectionConfig(BaseConfig):
+    enable: bool = False
+    smooth_window: int = 8
+    selection_rule: str = "argmax"
+    min_prefix_len: int = 0
+    threshold: float = 0.6
+    fallback: str = "argmax"
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {"max_model_len", "load_format"}
 
@@ -143,6 +154,7 @@ class RolloutConfig(BaseConfig):
     top_k_strategy: str = "only_stu"  # "only_stu", "only_tch", "intersection", or "union"
     reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", or "none"
     teacher_temperature: float = 1.0  # Temperature for teacher logits (default 1.0, no scaling)
+    online_prefix_selection: OnlinePrefixSelectionConfig = field(default_factory=OnlinePrefixSelectionConfig)
 
     disable_log_stats: bool = True
 

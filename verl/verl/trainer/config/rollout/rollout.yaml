@@ -95,6 +95,17 @@ log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,fa
 # same as actor_rollout_ref.actor.ppo_max_token_len_per_gpu if it exists, otherwise 16384
 log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
 
+# Online teacher-prefix handoff selection. Teacher-side top-k distributions are
+# cached in the dataset; current student support is computed before rollout.
+online_prefix_selection:
+  _target_: verl.workers.config.OnlinePrefixSelectionConfig
+  enable: False
+  smooth_window: 8
+  selection_rule: argmax
+  min_prefix_len: 0
+  threshold: 0.6
+  fallback: argmax
+
 # disable logging statistics
 disable_log_stats: True
 

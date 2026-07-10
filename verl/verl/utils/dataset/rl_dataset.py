@@ -77,9 +77,19 @@ def _build_teacher_prefix_topk_tensors(
     topk_log_probs,
     teacher_prefix_sft_mask: torch.Tensor,
     max_prompt_length: int,
+    default_top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     ids_arr = np.asarray(topk_ids, dtype=np.int64)
     logp_arr = np.asarray(topk_log_probs, dtype=np.float32)
+    prefix_positions = torch.nonzero(teacher_prefix_sft_mask > 0, as_tuple=False).flatten()
+    if len(prefix_positions) == 0 and (ids_arr.size == 0 or logp_arr.size == 0):
+        top_k = default_top_k
+        if top_k <= 0:
+            raise RuntimeError("Cannot build empty teacher prefix top-k tensors because default_top_k is unknown.")
+        out_ids = torch.zeros((max_prompt_length, top_k), dtype=torch.long)
+        out_logp = torch.full((max_prompt_length, top_k), -float("inf"), dtype=torch.float32)
+        return out_ids, out_logp
+
     if ids_arr.ndim != 2 or logp_arr.ndim != 2 or ids_arr.shape != logp_arr.shape:
         raise RuntimeError(
             "teacher_prefix_top_k_ids and teacher_prefix_top_k_log_probs must have matching 2D shapes; "
@@ -89,7 +99,6 @@ def _build_teacher_prefix_topk_tensors(
     top_k = ids_arr.shape[-1]
     out_ids = torch.zeros((max_prompt_length, top_k), dtype=torch.long)
     out_logp = torch.full((max_prompt_length, top_k), -float("inf"), dtype=torch.float32)
-    prefix_positions = torch.nonzero(teacher_prefix_sft_mask > 0, as_tuple=False).flatten()
     if len(prefix_positions) != ids_arr.shape[0]:
         raise RuntimeError(
             "teacher prefix soft-KL target length does not match teacher_prefix_sft_mask; "
@@ -209,6 +218,18 @@ class RLHFDataset(Dataset):
         self._download()
         self._read_files_and_tokenize()
 
+    @staticmethod
+    def _infer_teacher_prefix_top_k(dataframe: datasets.Dataset) -> int:
+        required_columns = {"teacher_prefix_top_k_ids", "teacher_prefix_top_k_log_probs"}
+        if not required_columns.issubset(set(dataframe.column_names)):
+            return 0
+        for row in dataframe:
+            ids_arr = np.asarray(row.get("teacher_prefix_top_k_ids"), dtype=np.int64)
+            logp_arr = np.asarray(row.get("teacher_prefix_top_k_log_probs"), dtype=np.float32)
+            if ids_arr.ndim == 2 and logp_arr.ndim == 2 and ids_arr.shape == logp_arr.shape and ids_arr.shape[-1] > 0:
+                return int(ids_arr.shape[-1])
+        return 0
+
     def _download(self, use_origin_parquet=False):
         from verl.utils.fs import copy_to_local
 
@@ -238,6 +259,9 @@ class RLHFDataset(Dataset):
             print(f"selected {self.max_samples} random samples out of {total}")
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
+        self.teacher_prefix_top_k = int(self.config.get("teacher_prefix_top_k", 0) or 0)
+        if self.teacher_prefix_top_k <= 0:
+            self.teacher_prefix_top_k = self._infer_teacher_prefix_top_k(self.dataframe)
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
@@ -533,6 +557,7 @@ class RLHFDataset(Dataset):
                 topk_log_probs=row_dict["teacher_prefix_top_k_log_probs"],
                 teacher_prefix_sft_mask=teacher_prefix_sft_mask,
                 max_prompt_length=self.max_prompt_length,
+                default_top_k=self.teacher_prefix_top_k,
             )
             row_dict["teacher_prefix_top_k_ids"] = teacher_prefix_top_k_ids
             row_dict["teacher_prefix_top_k_log_probs"] = teacher_prefix_top_k_log_probs

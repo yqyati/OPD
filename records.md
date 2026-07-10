@@ -617,6 +617,68 @@ The original consolidated table above is kept unchanged. The same rows are split
 | Batch mixed full-SFT + plain OPD | 0.045833 | 0.035417 | 0.245313 | 0.108854 |
 | Our method: TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.060417 | 0.045833 | 0.350000 | 0.152083 |
 
+#### Qwen3-4B-Base student + Qwen3-30B-A3B-Base teacher
+
+This setting tests whether the prefix-based method still helps when scaling the teacher from 4B to 30B-A3B while using a larger 4B student. Evaluation uses `n=16`, `temperature=0.7`, `top_p=0.95`, and `max_tokens=16384`.
+
+| Method | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.035417 | 0.014583 | 0.104688 | 0.051563 |
+| Fixed Prefix128 + SFT(prefix, 0.1) + suffix OPD | 0.047917 | 0.010417 | 0.221875 | 0.093403 |
+| Our method: SmoothMass Argmax Prefix + SFT(prefix, 0.1) + suffix OPD | 0.075000 | 0.027083 | 0.217188 | 0.106424 |
+
+Key comparisons:
+
+| Comparison | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Fixed Prefix128 - Plain OPD | +0.012500 | -0.004166 | +0.117187 | +0.041840 |
+| SmoothMass Argmax - Plain OPD | +0.039583 | +0.012500 | +0.112500 | +0.054861 |
+| SmoothMass Argmax - Fixed Prefix128 | +0.027083 | +0.016666 | -0.004687 | +0.013021 |
+
+Generation diagnostics:
+
+| Method | Avg output length | Format error rollouts |
+| --- | ---: | ---: |
+| Plain OPD | 4944.6 | 158 |
+| Fixed Prefix128 + SFT(prefix, 0.1) + suffix OPD | 4321.5 | 121 |
+| Our method: SmoothMass Argmax Prefix + SFT(prefix, 0.1) + suffix OPD | 3403.5 | 107 |
+
+Adaptive prefix selection details:
+
+| Statistic | Selected prefix length |
+| --- | ---: |
+| Mean | 85.04 |
+| Min | 0 |
+| 25% | 58 |
+| 50% | 92 |
+| 75% | 116 |
+| 90% | 125 |
+| 95% | 128 |
+| Max | 128 |
+
+Bucket counts:
+
+| Selected length bucket | Count |
+| --- | ---: |
+| 0-8 | 535 |
+| 9-16 | 154 |
+| 17-24 | 351 |
+| 25-32 | 638 |
+| 33-48 | 1663 |
+| 49-64 | 1861 |
+| 65-80 | 2041 |
+| 81-96 | 2352 |
+| 97-112 | 3045 |
+| 113-128 | 5277 |
+
+Interpretation:
+
+- Fixed Prefix128 already improves strongly over plain OPD, mostly from AMC23.
+- SmoothMass Argmax further improves the average score over Fixed Prefix128 by `+0.013021`.
+- SmoothMass Argmax improves both AIME24 and AIME25 over Fixed Prefix128, while AMC23 is slightly lower.
+- SmoothMass Argmax also reduces average output length and format errors, suggesting that adaptive handoff can make the rollout more stable rather than merely changing the SFT/OPD loss.
+- The selected prefix length distribution is broad. This supports the view that a fixed global handoff length is suboptimal: many samples prefer shorter prefixes, while a substantial portion still benefits from near-128-token teacher prefixes.
+
 Key comparisons:
 
 | Family | Comparison | AIME24 | AIME25 | AMC23 | Avg |

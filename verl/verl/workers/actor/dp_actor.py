@@ -509,6 +509,184 @@ class DataParallelPPOActor(BasePPOActor):
 
         return topk_log_probs_tensor
 
+    @staticmethod
+    def _moving_average_1d(values: torch.Tensor, window: int) -> torch.Tensor:
+        if values.numel() == 0 or window <= 1:
+            return values
+        out = torch.empty_like(values)
+        cumsum = torch.cumsum(values, dim=0)
+        for idx in range(values.numel()):
+            start = max(0, idx - window + 1)
+            total = cumsum[idx] - (cumsum[start - 1] if start > 0 else 0)
+            out[idx] = total / float(idx - start + 1)
+        return out
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_online_prefix_handoff(self, data: DataProto) -> DataProto:
+        """Select teacher-prefix lengths using cached teacher top-k and current student logits.
+
+        This is used before rollout. The dataset provides full teacher prefixes
+        plus teacher-side cached top-k distributions. The current actor scores
+        the same prefix positions in one teacher-forced forward pass, then each
+        sample selects a prefix length by smoothed interaction mass.
+        """
+        self.actor_module.eval()
+
+        required = {
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "teacher_prefix_sft_mask",
+            "teacher_prefix_top_k_ids",
+            "teacher_prefix_top_k_log_probs",
+        }
+        missing = required - set(data.batch.keys())
+        if missing:
+            raise RuntimeError(f"online prefix handoff missing required batch keys: {sorted(missing)}")
+
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = float(data.meta_info.get("temperature", 1.0))
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        smooth_window = int(data.meta_info.get("online_prefix_smooth_window", 8))
+        min_prefix_len = int(data.meta_info.get("online_prefix_min_prefix_len", 0))
+        selection_rule = data.meta_info.get("online_prefix_selection_rule", "argmax")
+        threshold = float(data.meta_info.get("online_prefix_threshold", 0.6))
+        fallback = data.meta_info.get("online_prefix_fallback", "argmax")
+
+        select_keys = [
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "teacher_prefix_sft_mask",
+            "teacher_prefix_top_k_ids",
+            "teacher_prefix_top_k_log_probs",
+        ]
+        data = data.select(batch_keys=select_keys)
+
+        if use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+        else:
+            micro_batches = data.split(micro_batch_size)
+
+        selected_lens = []
+        selected_scores = []
+        raw_scores_at_selected = []
+        score_maxes = []
+        score_means = []
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            input_ids = model_inputs["input_ids"]
+            attention_mask = model_inputs["attention_mask"]
+            position_ids = model_inputs["position_ids"]
+            prefix_mask = model_inputs["teacher_prefix_sft_mask"] > 0
+            teacher_topk_ids = model_inputs["teacher_prefix_top_k_ids"]
+            teacher_topk_logp = model_inputs["teacher_prefix_top_k_log_probs"].float()
+
+            with torch.no_grad(), torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                outputs = self.actor_module(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                )
+                logits = outputs.logits.float() / temperature
+
+            batch_selected_lens = []
+            batch_selected_scores = []
+            batch_raw_scores = []
+            batch_score_maxes = []
+            batch_score_means = []
+
+            for row_idx in range(input_ids.shape[0]):
+                positions = torch.nonzero(prefix_mask[row_idx], as_tuple=False).flatten()
+                if positions.numel() == 0:
+                    batch_selected_lens.append(0)
+                    batch_selected_scores.append(0.0)
+                    batch_raw_scores.append(0.0)
+                    batch_score_maxes.append(0.0)
+                    batch_score_means.append(0.0)
+                    continue
+
+                s_logits = logits[row_idx].index_select(0, positions)
+                s_logp = torch.log_softmax(s_logits, dim=-1)
+                k = teacher_topk_ids.shape[-1]
+                s_vals, s_ids = torch.topk(s_logp, k=k, dim=-1)
+                t_ids = teacher_topk_ids[row_idx].index_select(0, positions).to(s_ids.device)
+                t_vals = teacher_topk_logp[row_idx].index_select(0, positions).to(s_vals.device)
+
+                valid_teacher = torch.isfinite(t_vals)
+                eq = s_ids.unsqueeze(-1).eq(t_ids.unsqueeze(-2)) & valid_teacher.unsqueeze(-2)
+                s_shared = eq.any(dim=-1)
+                t_shared = eq.any(dim=-2)
+                student_mass = (s_vals.exp() * s_shared).sum(dim=-1)
+                teacher_mass = (t_vals.exp() * t_shared * valid_teacher).sum(dim=-1)
+                scores = torch.minimum(student_mass, teacher_mass)
+                smoothed = self._moving_average_1d(scores, smooth_window)
+
+                start_idx = min(max(min_prefix_len - 1, 0), max(smoothed.numel() - 1, 0))
+                if selection_rule == "threshold":
+                    selected_idx = None
+                    for idx in range(start_idx, smoothed.numel()):
+                        if float(smoothed[idx].detach().cpu()) >= threshold:
+                            selected_idx = idx
+                            break
+                    if selected_idx is None:
+                        if fallback == "zero":
+                            selected_idx = -1
+                        elif fallback == "max":
+                            selected_idx = smoothed.numel() - 1
+                        else:
+                            selected_idx = int(torch.argmax(smoothed).item())
+                else:
+                    selected_idx = start_idx + int(torch.argmax(smoothed[start_idx:]).item())
+
+                if selected_idx < 0:
+                    selected_len = 0
+                    selected_score = 0.0
+                    raw_score = 0.0
+                else:
+                    selected_len = selected_idx + 1
+                    selected_score = float(smoothed[selected_idx].detach().cpu())
+                    raw_score = float(scores[selected_idx].detach().cpu())
+
+                batch_selected_lens.append(selected_len)
+                batch_selected_scores.append(selected_score)
+                batch_raw_scores.append(raw_score)
+                batch_score_maxes.append(float(smoothed.max().detach().cpu()))
+                batch_score_means.append(float(smoothed.mean().detach().cpu()))
+
+            selected_lens.append(torch.tensor(batch_selected_lens, dtype=torch.long, device=input_ids.device))
+            selected_scores.append(torch.tensor(batch_selected_scores, dtype=torch.float32, device=input_ids.device))
+            raw_scores_at_selected.append(torch.tensor(batch_raw_scores, dtype=torch.float32, device=input_ids.device))
+            score_maxes.append(torch.tensor(batch_score_maxes, dtype=torch.float32, device=input_ids.device))
+            score_means.append(torch.tensor(batch_score_means, dtype=torch.float32, device=input_ids.device))
+
+        selected_lens = torch.cat(selected_lens, dim=0)
+        selected_scores = torch.cat(selected_scores, dim=0)
+        raw_scores_at_selected = torch.cat(raw_scores_at_selected, dim=0)
+        score_maxes = torch.cat(score_maxes, dim=0)
+        score_means = torch.cat(score_means, dim=0)
+
+        if use_dynamic_bsz:
+            selected_lens = restore_dynamic_batch(selected_lens, batch_idx_list)
+            selected_scores = restore_dynamic_batch(selected_scores, batch_idx_list)
+            raw_scores_at_selected = restore_dynamic_batch(raw_scores_at_selected, batch_idx_list)
+            score_maxes = restore_dynamic_batch(score_maxes, batch_idx_list)
+            score_means = restore_dynamic_batch(score_means, batch_idx_list)
+
+        return DataProto.from_dict(
+            tensors={
+                "online_prefix_selected_len": selected_lens,
+                "online_prefix_selected_score": selected_scores,
+                "online_prefix_selected_score_raw": raw_scores_at_selected,
+                "online_prefix_score_max": score_maxes,
+                "online_prefix_score_mean": score_means,
+            }
+        )
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_distillation_reward(self, data: DataProto) -> DataProto:
         """Compute the distillation reward (rm_scores) on GPU
