@@ -100,6 +100,8 @@ class OnlinePrefixSelectionConfig(BaseConfig):
     selection_rule: str = "argmax"
     min_prefix_len: int = 0
     threshold: float = 0.6
+    near_max_ratio: float = 0.99
+    overlap_threshold: float = 0.4
     fallback: str = "argmax"
 
 

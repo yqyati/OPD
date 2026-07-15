@@ -44,6 +44,17 @@ def _get_teacher_prefix_text(example: dict) -> str:
     return str(prefix)
 
 
+def _get_teacher_prefix_token_ids(example: dict) -> list[int] | None:
+    token_ids = example.get("teacher_prefix_token_ids")
+    if token_ids is None:
+        return None
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    if not isinstance(token_ids, (list, tuple)) or len(token_ids) == 0:
+        return None
+    return [int(token_id) for token_id in token_ids]
+
+
 def _build_teacher_prefix_sft_mask(
     *,
     base_prompt_ids: list[int],
@@ -82,13 +93,19 @@ def _build_teacher_prefix_topk_tensors(
     ids_arr = np.asarray(topk_ids, dtype=np.int64)
     logp_arr = np.asarray(topk_log_probs, dtype=np.float32)
     prefix_positions = torch.nonzero(teacher_prefix_sft_mask > 0, as_tuple=False).flatten()
-    if len(prefix_positions) == 0 and (ids_arr.size == 0 or logp_arr.size == 0):
+    if ids_arr.size == 0 and logp_arr.size == 0:
         top_k = default_top_k
         if top_k <= 0:
             raise RuntimeError("Cannot build empty teacher prefix top-k tensors because default_top_k is unknown.")
         out_ids = torch.zeros((max_prompt_length, top_k), dtype=torch.long)
         out_logp = torch.full((max_prompt_length, top_k), -float("inf"), dtype=torch.float32)
         return out_ids, out_logp
+
+    if ids_arr.size == 0 or logp_arr.size == 0:
+        raise RuntimeError(
+            "teacher_prefix_top_k_ids and teacher_prefix_top_k_log_probs must either both be empty or both be present; "
+            f"got ids_arr.size={ids_arr.size} logp_arr.size={logp_arr.size}"
+        )
 
     if ids_arr.ndim != 2 or logp_arr.ndim != 2 or ids_arr.shape != logp_arr.shape:
         raise RuntimeError(
@@ -99,15 +116,15 @@ def _build_teacher_prefix_topk_tensors(
     top_k = ids_arr.shape[-1]
     out_ids = torch.zeros((max_prompt_length, top_k), dtype=torch.long)
     out_logp = torch.full((max_prompt_length, top_k), -float("inf"), dtype=torch.float32)
-    if len(prefix_positions) != ids_arr.shape[0]:
-        raise RuntimeError(
-            "teacher prefix soft-KL target length does not match teacher_prefix_sft_mask; "
-            f"targets={ids_arr.shape[0]} mask_tokens={len(prefix_positions)}"
-        )
-
     if len(prefix_positions) > 0:
-        out_ids[prefix_positions] = torch.from_numpy(ids_arr)
-        out_logp[prefix_positions] = torch.from_numpy(logp_arr)
+        # vLLM token ids and HF re-tokenized teacher_prefix_text can differ by
+        # a small number of boundary tokens. Align to the dataset mask and leave
+        # any missing top-k rows as invalid padding.
+        aligned_len = min(len(prefix_positions), ids_arr.shape[0])
+        if aligned_len > 0:
+            aligned_positions = prefix_positions[:aligned_len]
+            out_ids[aligned_positions] = torch.from_numpy(ids_arr[:aligned_len])
+            out_logp[aligned_positions] = torch.from_numpy(logp_arr[:aligned_len])
     return out_ids, out_logp
 
 
@@ -183,6 +200,7 @@ class RLHFDataset(Dataset):
         self.video_key = config.get("video_key", "videos")
         self.image_patch_size = config.get("image_patch_size", 14)
         self.max_prompt_length = config.get("max_prompt_length", 1024)
+        self.teacher_prefix_max_len = int(config.get("teacher_prefix_max_len", 0) or 0)
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
         self.truncation = config.get("truncation", "error")
@@ -332,8 +350,15 @@ class RLHFDataset(Dataset):
                         base_prompt = tokenizer.apply_chat_template(
                             doc[prompt_key], add_generation_prompt=True, tokenize=False, **apply_kwargs
                         )
-                        raw_prompt = base_prompt + _get_teacher_prefix_text(doc)
-                        return len(tokenizer.encode(raw_prompt, add_special_tokens=False))
+                        base_prompt_ids = tokenizer.encode(base_prompt, add_special_tokens=False)
+                        teacher_prefix_token_ids = _get_teacher_prefix_token_ids(doc)
+                        if teacher_prefix_token_ids is None:
+                            teacher_prefix_token_ids = tokenizer.encode(
+                                _get_teacher_prefix_text(doc), add_special_tokens=False
+                            )
+                        if self.teacher_prefix_max_len > 0:
+                            teacher_prefix_token_ids = teacher_prefix_token_ids[: self.teacher_prefix_max_len]
+                        return len(base_prompt_ids) + len(teacher_prefix_token_ids)
                     except Exception:
                         print("Error processing one of the samples, skipping...")
                         traceback.print_exc()
@@ -486,14 +511,30 @@ class RLHFDataset(Dataset):
             base_prompt = self.tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
-            teacher_prefix_text = _get_teacher_prefix_text(row_dict)
-            raw_prompt = base_prompt + teacher_prefix_text
-            model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
-            input_ids = model_inputs.pop("input_ids")
-            attention_mask = model_inputs.pop("attention_mask")
+            base_prompt_ids = self.tokenizer.encode(base_prompt, add_special_tokens=False)
+            teacher_prefix_token_ids = _get_teacher_prefix_token_ids(row_dict)
+            if teacher_prefix_token_ids is None and self.teacher_prefix_max_len > 0:
+                teacher_prefix_token_ids = self.tokenizer.encode(
+                    _get_teacher_prefix_text(row_dict), add_special_tokens=False
+                )
+            if teacher_prefix_token_ids is not None and self.teacher_prefix_max_len > 0:
+                teacher_prefix_token_ids = teacher_prefix_token_ids[: self.teacher_prefix_max_len]
+            if teacher_prefix_token_ids is not None:
+                full_prompt_ids = base_prompt_ids + teacher_prefix_token_ids
+                input_ids = torch.tensor([full_prompt_ids], dtype=torch.long)
+                attention_mask = torch.ones_like(input_ids)
+            else:
+                teacher_prefix_text = _get_teacher_prefix_text(row_dict)
+                raw_prompt = base_prompt + teacher_prefix_text
+                model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+                input_ids = model_inputs.pop("input_ids")
+                attention_mask = model_inputs.pop("attention_mask")
+                full_prompt_ids = input_ids[0].tolist()
 
-        base_prompt_ids = self.tokenizer.encode(base_prompt, add_special_tokens=False)
-        full_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        if "base_prompt_ids" not in locals():
+            base_prompt_ids = self.tokenizer.encode(base_prompt, add_special_tokens=False)
+        if "full_prompt_ids" not in locals():
+            full_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         teacher_prefix_sft_mask = _build_teacher_prefix_sft_mask(
             base_prompt_ids=base_prompt_ids,
             full_prompt_ids=full_prompt_ids,
@@ -552,9 +593,14 @@ class RLHFDataset(Dataset):
         row_dict["teacher_prefix_sft_mask"] = teacher_prefix_sft_mask
         row_dict["opd_loss_mask"] = torch.tensor(float(row_dict.get("opd_loss_mask", 1.0)), dtype=torch.float32)
         if "teacher_prefix_top_k_ids" in row_dict and "teacher_prefix_top_k_log_probs" in row_dict:
+            topk_ids = row_dict["teacher_prefix_top_k_ids"]
+            topk_log_probs = row_dict["teacher_prefix_top_k_log_probs"]
+            if self.teacher_prefix_max_len > 0:
+                topk_ids = topk_ids[: self.teacher_prefix_max_len]
+                topk_log_probs = topk_log_probs[: self.teacher_prefix_max_len]
             teacher_prefix_top_k_ids, teacher_prefix_top_k_log_probs = _build_teacher_prefix_topk_tensors(
-                topk_ids=row_dict["teacher_prefix_top_k_ids"],
-                topk_log_probs=row_dict["teacher_prefix_top_k_log_probs"],
+                topk_ids=topk_ids,
+                topk_log_probs=topk_log_probs,
                 teacher_prefix_sft_mask=teacher_prefix_sft_mask,
                 max_prompt_length=self.max_prompt_length,
                 default_top_k=self.teacher_prefix_top_k,

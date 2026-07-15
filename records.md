@@ -745,3 +745,125 @@ Suggested paper wording:
 Related reward-curve figure:
 
 `analysis_plots/qwen3_nothink_reward_curves.png`
+
+## 2026-07-10 Prefix1024 and Adaptive Handoff Ablations
+
+Setting unless otherwise noted:
+
+- Student: `Qwen3-1.7B-Base`
+- Teacher: `Qwen3-4B-Base`
+- Teacher thinking disabled by Qwen3 chat template.
+- Training data: `DAPO-Math-17k`
+- Rollout response length: `7168`
+- Final eval: temperature `0.7`, top-p `0.95`, `n=16`
+- AIME/AMC eval max tokens: `16384`
+
+### AIME24 / AIME25 / AMC23
+
+| Method | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.052083 | 0.029167 | 0.239063 | 0.106771 |
+| TeacherPrefix128 pure SFT | 0.050000 | 0.029167 | 0.282813 | 0.120660 |
+| TeacherPrefix1024 pure SFT | 0.016667 | 0.066667 | 0.175000 | 0.086111 |
+| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.060417 | 0.045833 | 0.350000 | 0.152083 |
+| Fixed TeacherPrefix1024 + SFT(prefix, 0.1) + suffix OPD | 0.066667 | 0.033333 | 0.437500 | 0.179167 |
+| Online SmoothMass Argmax Prefix1024 + SFT(prefix, 0.1) + suffix OPD | 0.066667 | 0.083333 | 0.325000 | 0.158333 |
+| Longest Sufficient Mass+Overlap Prefix1024 + SFT(prefix, 0.1) + suffix OPD | 0.083333 | 0.016667 | 0.337500 | 0.145833 |
+
+Key comparisons:
+
+| Comparison | AIME24 | AIME25 | AMC23 | Avg |
+| --- | ---: | ---: | ---: | ---: |
+| TeacherPrefix1024 pure SFT - Plain OPD | -0.035416 | +0.037500 | -0.064063 | -0.020660 |
+| Fixed TeacherPrefix1024 - Plain OPD | +0.014584 | +0.004166 | +0.198437 | +0.072396 |
+| Online SmoothMass Argmax Prefix1024 - Plain OPD | +0.014584 | +0.054166 | +0.085937 | +0.051562 |
+| LSMO Prefix1024 - Plain OPD | +0.031250 | -0.012500 | +0.098437 | +0.039062 |
+| Fixed TeacherPrefix1024 - TeacherPrefix128 joint | +0.006250 | -0.012500 | +0.087500 | +0.027084 |
+| Online SmoothMass Argmax Prefix1024 - Fixed TeacherPrefix1024 | +0.000000 | +0.050000 | -0.112500 | -0.020834 |
+| LSMO Prefix1024 - Fixed TeacherPrefix1024 | +0.016666 | -0.016666 | -0.100000 | -0.033334 |
+
+Generation diagnostics:
+
+| Method | Avg output length AIME24 | Avg output length AIME25 | Avg output length AMC23 | Format error rollouts total |
+| --- | ---: | ---: | ---: | ---: |
+| TeacherPrefix1024 pure SFT | 13038.1 | 11802.5 | 11476.3 | 912 |
+| Fixed TeacherPrefix1024 + SFT(prefix, 0.1) + suffix OPD | 5747.7 | 3710.9 | 1801.4 | 280 |
+| Online SmoothMass Argmax Prefix1024 + SFT(prefix, 0.1) + suffix OPD | 3969.4 | 2463.2 | 2447.5 | 224 |
+| LSMO Prefix1024 + SFT(prefix, 0.1) + suffix OPD | 4699.2 | 3019.3 | 2182.1 | 240 |
+
+Notes:
+
+- `TeacherPrefix1024 pure SFT` is a negative ablation. Although SFT loss decreases, eval average drops to `0.086111`, below plain OPD. It also produces very long outputs and many format errors. This supports the view that long teacher-prefix imitation alone overfits to teacher continuation style rather than producing useful on-policy solving behavior.
+- `Fixed TeacherPrefix1024 + SFT(prefix, 0.1) + suffix OPD` is currently the best AIME/AMC result in the base-teacher prefix1024 setting, Avg `0.179167`.
+- `Online SmoothMass Argmax Prefix1024` improves over Prefix128 but underperforms fixed Prefix1024. It selected much shorter prefixes on average, around `508` tokens, suggesting over-early handoff.
+- `Longest Sufficient Mass+Overlap Prefix1024` selected much longer prefixes, around `777` tokens on average, but still underperformed fixed Prefix1024. This indicates that selecting the longest near-max shared-support prefix is not sufficient.
+
+### Adaptive Prefix Selection Diagnostics
+
+| Method | Original prefix len mean | Selected prefix len mean | Recent selected len mean | Selected score mean | Selected overlap mean | Eval Avg |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Online SmoothMass Argmax Prefix1024 | 816.50 | 508.38 | 490.62 | 0.9725 | n/a | 0.158333 |
+| Longest Sufficient Mass+Overlap Prefix1024 | 816.50 | 776.66 | 746.35 | 0.9719 | 0.6263 | 0.145833 |
+
+Phase-wise selected length:
+
+| Method | Steps 1-50 | 51-100 | 101-150 | 151-200 | 201-250 | 251-279 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Online SmoothMass Argmax Prefix1024 | 504.45 | 516.46 | 493.03 | 508.14 | 526.50 | 496.86 |
+| Longest Sufficient Mass+Overlap Prefix1024 | 784.56 | 792.68 | 752.09 | 768.64 | 793.70 | 762.18 |
+
+Interpretation:
+
+- Neither adaptive rule produced a clear trend where prefix length decreases with training progress.
+- Argmax chooses a local shared-support peak and tends to hand off too early.
+- Longest-sufficient keeps the teacher scaffold much longer but does not improve final accuracy.
+- These results suggest the next adaptive rule should target the earliest point where OPD becomes appropriate, not the local maximum or the longest sufficient prefix:
+
+`earliest sufficient shared-support prefix = min { l >= l_min : interaction_mass(l) >= tau_m and overlap(l) >= tau_o }`
+
+This rule directly tests the hypothesis that as the student learns, it reaches sufficient shared support earlier and therefore needs less teacher prefix before OPD can begin.
+
+### MATH-500
+
+Eval setting:
+
+- `max_tokens=7096`
+- `n=16`
+
+| Method | MATH-500 mean | Best | solve_none | solve_all | Avg Len | Format Err |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain OPD | 0.471000 | 0.636000 | 182 | 153 | 1627.4 | 1832 |
+| TeacherPrefix128 + SFT(prefix, 0.1) + suffix OPD | 0.572000 | 0.686000 | 157 | 229 | 1294.5 | 872 |
+| Online SmoothMass Argmax Prefix1024 + SFT(prefix, 0.1) + suffix OPD | 0.619000 | 0.710000 | 145 | 264 | 967.7 | 440 |
+| Fixed TeacherPrefix1024 + SFT(prefix, 0.1) + suffix OPD | 0.621000 | 0.722000 | 139 | 260 | 958.4 | 472 |
+
+Interpretation:
+
+- Prefix methods transfer strongly to MATH-500.
+- Fixed TeacherPrefix1024 and Online SmoothMass Argmax are essentially tied on MATH-500: `0.621` vs `0.619`.
+- Prefix methods substantially reduce format errors and output length compared with plain OPD.
+
+### HMMT25 Stress Test
+
+Eval setting:
+
+- Model: `Online SmoothMass Argmax Prefix1024 + SFT(prefix, 0.1) + suffix OPD`
+- `max_tokens=7096`
+- `n=16`
+
+| Method | HMMT25 mean | Best | solve_none | solve_all | Avg Len | Format Err |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Online SmoothMass Argmax Prefix1024 + SFT(prefix, 0.1) + suffix OPD | 0.000000 | 0.000000 | 30 | 0 | 1247.8 | 16 |
+
+Interpretation:
+
+- HMMT25 is too hard for the current Qwen3-1.7B / Qwen3-4B base-teacher setting.
+- Manual inspection showed the model usually produced boxed answers, but the answers were wrong. This is not primarily a formatting failure.
+- HMMT25 is useful as a stress test but not currently useful for comparing prefix variants unless the teacher or stronger baselines achieve nonzero performance.
+
+### Current Takeaways
+
+- The best current base-teacher result on AIME/AMC is fixed TeacherPrefix1024 + prefix SFT + suffix OPD, Avg `0.179167`.
+- Prefix1024 pure SFT is worse than plain OPD, despite using stronger/longer teacher prefixes. This supports the central claim that teacher prefix alone is not enough; suffix OPD is needed to turn prefix conditioning into useful on-policy behavior.
+- MATH-500 confirms that prefix-conditioned OPD improves broad math performance and reduces format errors.
+- Dynamic prefix selection remains unresolved. Argmax is too short; longest-sufficient is too long; the next rule should test earliest sufficient shared support as the criterion for when OPD should begin.

@@ -35,11 +35,24 @@ fi
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
 export EVAL_GPUS=${EVAL_GPUS:-0,1,2,3}
 export RUN_MODE=${RUN_MODE:-sequence} # sequence / plain / prefix
+export ENABLE_THINKING=${ENABLE_THINKING:-False}
+export DATA_SHUFFLE=${DATA_SHUFFLE:-False}
+export DATA_SEED=${DATA_SEED:-42}
 export TEACHER_PREFIX_GENERATION_SCRIPT=${TEACHER_PREFIX_GENERATION_SCRIPT:-scripts/teacher_prefix/run_qwen3_base_teacher_prefix128_4gpu.sh}
+
+case "${ENABLE_THINKING,,}" in
+    true) CHAT_TEMPLATE_ENABLE_THINKING=True; EVAL_THINKING_ARG=--enable-thinking ;;
+    false) CHAT_TEMPLATE_ENABLE_THINKING=False; EVAL_THINKING_ARG=--disable-thinking ;;
+    *)
+        echo "ENABLE_THINKING must be True or False; got ${ENABLE_THINKING}" >&2
+        exit 1
+        ;;
+esac
+export CHAT_TEMPLATE_ENABLE_THINKING
 
 if [ "$RUN_MODE" = "sequence" ]; then
     echo "RUN_MODE=sequence: run plain OPD first, then generate no-think teacher prefix, then run prefix OPD."
-    if ! RUN_MODE=plain N_GPUS_PER_NODE="$N_GPUS_PER_NODE" EVAL_GPUS="$EVAL_GPUS" bash "$0"; then
+    if ! RUN_MODE=plain ENABLE_THINKING="$ENABLE_THINKING" N_GPUS_PER_NODE="$N_GPUS_PER_NODE" EVAL_GPUS="$EVAL_GPUS" bash "$0"; then
         echo "Plain OPD stage failed; stop sequence." >&2
         exit 1
     fi
@@ -49,7 +62,7 @@ if [ "$RUN_MODE" = "sequence" ]; then
         exit 1
     fi
     ray stop --force || true
-    if ! RUN_MODE=prefix N_GPUS_PER_NODE="$N_GPUS_PER_NODE" EVAL_GPUS="$EVAL_GPUS" bash "$0"; then
+    if ! RUN_MODE=prefix ENABLE_THINKING="$ENABLE_THINKING" N_GPUS_PER_NODE="$N_GPUS_PER_NODE" EVAL_GPUS="$EVAL_GPUS" bash "$0"; then
         echo "Teacher-prefix OPD stage failed; stop sequence." >&2
         exit 1
     fi
@@ -106,6 +119,7 @@ if [ -z "${TEACHER_PREFIX_SFT_LOSS_COEF+x}" ]; then
         export TEACHER_PREFIX_SFT_LOSS_COEF=0.0
     fi
 fi
+export TEACHER_PREFIX_SOFT_KL_LOSS_COEF=${TEACHER_PREFIX_SOFT_KL_LOSS_COEF:-0.0}
 
 # TODO: qwen3_1p7b_base / qwen3_1p7b / llama31_8b_base / llama31_8b_inst / qwen3_8b_base / qwen3_8b / qwen25_1p5b_base / qwen25_1p5b_inst / qwen25_7b_base / qwen25_7b_inst / qwen25_math_7b_base / qwen25_math_7b_inst / qwen25_math_1p5b_base / qwen25_math_1p5b_inst / distill_r1_1p5b / olmo2_1124_7b_base / olmo2_1124_7b_sft / olmo2_1124_7b_inst / llama32_3b_inst
 # export EXPERIMENT_NAME=grpo_${TASK}_llama31_tulu3_8b_sft_8k-T_${TEMPERATURE}-n_${N_RESPONSES}-kl_${USE_KL}-mbs_${MINI_BATCH_SIZE}-${REWARD_TYPE}-$(date +%Y-%m-%d_%H-%M-%S)
@@ -140,7 +154,7 @@ fi
 # export TRAIN_DATASET_NAME=OpenThoughts3-1.2M-opd
 # export TRAIN_DATASET_NAME=OpenThoughts3-1.2M-30k
 
-export TEST_DATA_DIR=datasets/test_data
+export TEST_DATA_DIR=${TEST_DATA_DIR:-scripts/val/data}
 # TRAIN_DATASET=${TRAIN_FILE:-["$DATA_DIR/$TASK/train_${SAMPLE_SIZE}.parquet"]}
 TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR/AMC23/test.parquet", "$TEST_DATA_DIR/AIME24/test.parquet"]}
 # TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME24/test.parquet"]}
@@ -181,7 +195,7 @@ export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 export PROJECT_PATH=checkpoint
 export PARALLEL_SIZE=1
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
-export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
+export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-softkl_${TEACHER_PREFIX_SOFT_KL_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
 
@@ -192,7 +206,7 @@ export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 export HYDRA_FULL_ERROR=1
 
 
-export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
+export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-lr_${LR}-sftcoef_${TEACHER_PREFIX_SFT_LOSS_COEF}-softkl_${TEACHER_PREFIX_SOFT_KL_LOSS_COEF}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 
 KL_ARGS=""
 if [ "$USE_KL" = "True" ]; then
@@ -240,7 +254,7 @@ for prompt, prefix in zip(df["prompt"], prefixes):
         messages,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=False,
+        enable_thinking=${CHAT_TEMPLATE_ENABLE_THINKING},
     )
     full_prompt = base + ("" if prefix is None else str(prefix))
     max_len = max(max_len, len(tokenizer.encode(full_prompt, add_special_tokens=False)))
@@ -261,6 +275,9 @@ MIN_SUCCESS_STEP=$(python3 -c "import math; print(math.ceil(${EXPECTED_STEPS} * 
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 echo "ROLLOUT_MAX_NUM_BATCHED_TOKENS: $ROLLOUT_MAX_NUM_BATCHED_TOKENS"
 echo "ROLLOUT_GPU_MEMORY_UTILIZATION: $ROLLOUT_GPU_MEMORY_UTILIZATION"
+echo "ENABLE_THINKING: $CHAT_TEMPLATE_ENABLE_THINKING"
+echo "DATA_SHUFFLE: $DATA_SHUFFLE"
+echo "DATA_SEED: $DATA_SEED"
 echo "TRAIN_BATCH_SIZE: $TRAIN_BATCH_SIZE"
 echo "EXPECTED_STEPS: $EXPECTED_STEPS"
 echo "MIN_SUCCESS_STEP: $MIN_SUCCESS_STEP"
@@ -274,7 +291,8 @@ set +e
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
-    data.shuffle=False \
+    data.shuffle=$DATA_SHUFFLE \
+    data.seed=$DATA_SEED \
     data.train_files="$TRAIN_DATASET" \
     data.val_files="$TEST_DATASET" \
     data.train_batch_size=$TRAIN_BATCH_SIZE \
@@ -283,7 +301,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    +data.apply_chat_template_kwargs.enable_thinking=False \
+    +data.apply_chat_template_kwargs.enable_thinking=$CHAT_TEMPLATE_ENABLE_THINKING \
     actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_activation_offload=False \
@@ -298,6 +316,7 @@ python3 -m verl.trainer.main_ppo \
     $KL_ARGS \
     actor_rollout_ref.actor.loss_agg_mode=$LOSS_AGG_MODE \
     +actor_rollout_ref.actor.teacher_prefix_sft_loss_coef=$TEACHER_PREFIX_SFT_LOSS_COEF \
+    +actor_rollout_ref.actor.teacher_prefix_soft_kl_loss_coef=$TEACHER_PREFIX_SOFT_KL_LOSS_COEF \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
@@ -412,7 +431,7 @@ python scripts/val/eval/gen_vllm.py \
     --temperature 0.7 \
     --top-p 0.95 \
     --gpus "$EVAL_GPUS" \
-    --disable-thinking
+    "$EVAL_THINKING_ARG"
 
 python scripts/val/eval/grade.py \
     --eval-dir "${EVAL_DIR}"

@@ -649,10 +649,44 @@ class RayPPOTrainer:
             metrics["online_prefix/selected_len_mean"] = float(np.mean(clipped_lens))
             metrics["online_prefix/selected_len_min"] = float(np.min(clipped_lens))
             metrics["online_prefix/selected_len_max"] = float(np.max(clipped_lens))
+            metrics["online_prefix/selected_len_p25"] = float(np.percentile(clipped_lens, 25))
+            metrics["online_prefix/selected_len_p50"] = float(np.percentile(clipped_lens, 50))
+            metrics["online_prefix/selected_len_p75"] = float(np.percentile(clipped_lens, 75))
+            metrics["online_prefix/selected_len_p90"] = float(np.percentile(clipped_lens, 90))
             metrics["online_prefix/selected_score_mean"] = float(
                 selection.batch["online_prefix_selected_score"].float().mean().item()
             )
             metrics["online_prefix/score_max_mean"] = float(selection.batch["online_prefix_score_max"].float().mean().item())
+            if "online_prefix_selected_overlap" in selection.batch.keys():
+                metrics["online_prefix/selected_overlap_mean"] = float(
+                    selection.batch["online_prefix_selected_overlap"].float().mean().item()
+                )
+            if "online_prefix_overlap_max" in selection.batch.keys():
+                metrics["online_prefix/overlap_max_mean"] = float(
+                    selection.batch["online_prefix_overlap_max"].float().mean().item()
+                )
+            if "online_prefix_overlap_mean" in selection.batch.keys():
+                metrics["online_prefix/overlap_mean"] = float(
+                    selection.batch["online_prefix_overlap_mean"].float().mean().item()
+                )
+            if "online_prefix_selected_route" in selection.batch.keys():
+                routes = selection.batch["online_prefix_selected_route"]
+                valid_routes = routes >= 0
+                if bool(valid_routes.any().item()):
+                    metrics["online_prefix/route_overlap_fraction"] = float(
+                        (routes[valid_routes] == 0).float().mean().item()
+                    )
+                    metrics["online_prefix/route_mass_fraction"] = float(
+                        (routes[valid_routes] == 1).float().mean().item()
+                    )
+            if "online_prefix_forward_time_s" in selection.batch.keys():
+                metrics["online_prefix/forward_time_s"] = float(
+                    selection.batch["online_prefix_forward_time_s"].float().mean().item()
+                )
+            if "online_prefix_scoring_time_s" in selection.batch.keys():
+                metrics["online_prefix/scoring_time_s"] = float(
+                    selection.batch["online_prefix_scoring_time_s"].float().mean().item()
+                )
 
     def _maybe_apply_online_prefix_selection(self, batch: DataProto, metrics: dict, timing_raw: dict) -> None:
         if not self._online_prefix_selection_enabled():
@@ -684,6 +718,8 @@ class RayPPOTrainer:
         score_batch.meta_info["online_prefix_min_prefix_len"] = online_cfg.get("min_prefix_len", 0)
         score_batch.meta_info["online_prefix_selection_rule"] = online_cfg.get("selection_rule", "argmax")
         score_batch.meta_info["online_prefix_threshold"] = online_cfg.get("threshold", 0.6)
+        score_batch.meta_info["online_prefix_near_max_ratio"] = online_cfg.get("near_max_ratio", 0.99)
+        score_batch.meta_info["online_prefix_overlap_threshold"] = online_cfg.get("overlap_threshold", 0.4)
         score_batch.meta_info["online_prefix_fallback"] = online_cfg.get("fallback", "argmax")
         with marked_timer("online_prefix", timing_raw, color="cyan"):
             selection = self.actor_rollout_wg.compute_online_prefix_handoff(score_batch)

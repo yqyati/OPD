@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Generate short teacher guides and attach them as teacher_prefix_text.
+"""Generate direct teacher hints and attach them as assistant-prefix targets.
 
-This intentionally reuses the existing teacher-prefix training path. The
-generated text is a concise guide instead of a raw teacher CoT continuation.
+Hint generation uses a dedicated meta-prompt, but that prompt is never copied
+into training data. Training reconstructs the original problem prompt and uses
+only the normalized hint as an assistant prefix.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -21,10 +23,43 @@ from score_prompt_opd_data import extract_prompt_text
 
 
 GUIDE_INSTRUCTION = (
-    "You are a math strategy teacher. Given the problem, write a concise guide for solving it. "
-    "Do not solve the problem completely. Do not compute or reveal the final answer. "
-    "Do not write a long chain-of-thought. Keep the guide within 1-3 sentences."
+    "Give a weaker math solver one concrete strategy hint for the problem. "
+    "Return exactly one <HINT>...</HINT> block containing 1-3 concise sentences. "
+    "State the key method, representation, theorem, or intermediate setup that the solver should use. "
+    "Do not restate the problem. Do not show a derivation. Do not perform calculations. "
+    "Do not reveal the final answer. Do not add headings, preambles, or follow-up commentary."
 )
+
+ANSWER_LEAK_PATTERN = re.compile(r"\\boxed\s*\{|(?:final\s+)?answer\s+is", re.IGNORECASE)
+
+
+def normalize_hint(text: str) -> str:
+    hint = " ".join((text or "").strip().split())
+    hint = hint.replace("<HINT>", "").replace("</HINT>", "").strip().strip('"')
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("Assistant:", "Strategy:", "Hint:", "Guide:"):
+            if hint.lower().startswith(prefix.lower()):
+                hint = hint[len(prefix) :].strip()
+                changed = True
+    return hint.strip()
+
+
+def select_hint_candidate(generated_candidates) -> tuple[object, str, bool]:
+    ranked = []
+    for candidate_idx, generated in enumerate(generated_candidates):
+        hint = normalize_hint(generated.text)
+        finish_reason = str(generated.finish_reason)
+        valid = (
+            bool(hint)
+            and len(hint.split()) >= 4
+            and "length" not in finish_reason.lower()
+            and ANSWER_LEAK_PATTERN.search(hint) is None
+        )
+        ranked.append((not valid, candidate_idx, len(generated.token_ids), generated, hint, valid))
+    _, _, _, generated, hint, valid = min(ranked, key=lambda item: (item[0], item[1], item[2]))
+    return generated, hint, valid
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--num-candidates", type=int, default=1)
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N rows for smoke tests.")
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing output parquet.")
@@ -112,10 +148,11 @@ def main() -> None:
         )
         tokenizer = llm.get_tokenizer()
         sampling = SamplingParams(
-            n=1,
+            n=args.num_candidates,
             temperature=args.temperature,
             top_p=args.top_p,
             max_tokens=args.max_new_tokens,
+            stop=["</HINT>"],
         )
 
         with temp_jsonl.open("a", encoding="utf-8") as f_out:
@@ -132,19 +169,26 @@ def main() -> None:
                 ]
                 outputs = llm.generate(prompts, sampling)
                 for idx, output in zip(batch_indices, outputs, strict=True):
-                    generated = output.outputs[0]
-                    guide_text = generated.text.strip()
-                    teacher_prefix_text = f"\n\nGuide:\n{guide_text}\n\nNow solve the problem.\n"
+                    generated, guide_text, candidate_valid = select_hint_candidate(output.outputs)
+                    teacher_prefix_text = f"Strategy: {guide_text}\nSolution:\n"
+                    teacher_prefix_token_ids = tokenizer.encode(
+                        teacher_prefix_text, add_special_tokens=False
+                    )
                     record = {
                         "__teacher_guide_row_id": idx,
                         "teacher_guide_text": guide_text,
                         "teacher_prefix_text": teacher_prefix_text,
+                        "teacher_prefix_token_ids": [int(token_id) for token_id in teacher_prefix_token_ids],
+                        "teacher_prefix_token_len": len(teacher_prefix_token_ids),
                         "teacher_guide_token_len": len(generated.token_ids),
                         "teacher_guide_finish_reason": str(generated.finish_reason),
                         "teacher_guide_model": args.teacher_model,
                         "teacher_guide_max_tokens": args.max_new_tokens,
                         "teacher_guide_temperature": args.temperature,
                         "teacher_guide_top_p": args.top_p,
+                        "teacher_hint_prompt_type": "direct_hint_v3_tagged_four_candidates_separate_generation_prompt",
+                        "teacher_hint_candidate_valid": candidate_valid,
+                        "teacher_hint_num_candidates": args.num_candidates,
                     }
                     f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f_out.flush()

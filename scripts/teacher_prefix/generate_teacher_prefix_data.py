@@ -161,12 +161,14 @@ def main() -> None:
                     record = {
                         "__teacher_prefix_row_id": idx,
                         "teacher_prefix_text": generated.text,
+                        "teacher_prefix_token_ids": [int(token_id) for token_id in generated.token_ids],
                         "teacher_prefix_token_len": len(generated.token_ids),
                         "teacher_prefix_finish_reason": str(generated.finish_reason),
                         "teacher_prefix_model": args.teacher_model,
                         "teacher_prefix_max_tokens": args.max_new_tokens,
                         "teacher_prefix_temperature": args.temperature,
                         "teacher_prefix_top_p": args.top_p,
+                        "teacher_prefix_enable_thinking": bool(args.enable_thinking),
                     }
                     if args.top_k_logprobs > 0:
                         record["teacher_prefix_top_k_ids"] = topk_ids

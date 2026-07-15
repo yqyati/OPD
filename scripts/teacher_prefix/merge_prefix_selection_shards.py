@@ -35,6 +35,9 @@ def main() -> None:
     if "__prefix_select_original_index" in df.columns:
         df = df.sort_values("__prefix_select_original_index").reset_index(drop=True)
         df = df.drop(columns=["__prefix_select_original_index"])
+    elif "__opd_original_index" in df.columns:
+        df = df.sort_values("__opd_original_index").reset_index(drop=True)
+        df = df.drop(columns=["__opd_original_index"])
 
     output.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output, index=False)

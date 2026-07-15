@@ -19,6 +19,7 @@ Single Process Actor
 
 import logging
 import os
+import time
 
 import torch
 from torch import nn
@@ -521,6 +522,25 @@ class DataParallelPPOActor(BasePPOActor):
             out[idx] = total / float(idx - start + 1)
         return out
 
+    @staticmethod
+    def _forward_moving_average_1d(values: torch.Tensor, window: int) -> torch.Tensor:
+        """Average fixed-size windows starting at each valid position.
+
+        Positions without a complete future window are invalid so short tail
+        windows cannot create high-variance maxima. If the whole prefix is
+        shorter than the requested window, its full mean is the sole candidate.
+        """
+        if values.numel() == 0 or window <= 1:
+            return values
+        out = torch.full_like(values, -float("inf"))
+        if values.numel() < window:
+            out[0] = values.mean()
+            return out
+        cumsum = torch.cat([torch.zeros(1, dtype=values.dtype, device=values.device), torch.cumsum(values, dim=0)])
+        window_sums = cumsum[window:] - cumsum[:-window]
+        out[: window_sums.numel()] = window_sums / float(window)
+        return out
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_online_prefix_handoff(self, data: DataProto) -> DataProto:
         """Select teacher-prefix lengths using cached teacher top-k and current student logits.
@@ -551,6 +571,8 @@ class DataParallelPPOActor(BasePPOActor):
         min_prefix_len = int(data.meta_info.get("online_prefix_min_prefix_len", 0))
         selection_rule = data.meta_info.get("online_prefix_selection_rule", "argmax")
         threshold = float(data.meta_info.get("online_prefix_threshold", 0.6))
+        near_max_ratio = float(data.meta_info.get("online_prefix_near_max_ratio", 0.99))
+        overlap_threshold = float(data.meta_info.get("online_prefix_overlap_threshold", 0.4))
         fallback = data.meta_info.get("online_prefix_fallback", "argmax")
 
         select_keys = [
@@ -574,6 +596,12 @@ class DataParallelPPOActor(BasePPOActor):
         raw_scores_at_selected = []
         score_maxes = []
         score_means = []
+        selected_overlaps = []
+        overlap_maxes = []
+        overlap_means = []
+        selected_routes = []
+        forward_time_s = 0.0
+        scoring_time_s = 0.0
 
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
@@ -585,6 +613,7 @@ class DataParallelPPOActor(BasePPOActor):
             teacher_topk_ids = model_inputs["teacher_prefix_top_k_ids"]
             teacher_topk_logp = model_inputs["teacher_prefix_top_k_log_probs"].float()
 
+            forward_start = time.perf_counter()
             with torch.no_grad(), torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
                 outputs = self.actor_module(
                     input_ids=input_ids,
@@ -592,14 +621,22 @@ class DataParallelPPOActor(BasePPOActor):
                     position_ids=position_ids,
                     use_cache=False,
                 )
-                logits = outputs.logits.float() / temperature
+                logits = outputs.logits
+            if self.device_name == "cuda":
+                torch.cuda.synchronize()
+            forward_time_s += time.perf_counter() - forward_start
 
             batch_selected_lens = []
             batch_selected_scores = []
             batch_raw_scores = []
             batch_score_maxes = []
             batch_score_means = []
+            batch_selected_overlaps = []
+            batch_overlap_maxes = []
+            batch_overlap_means = []
+            batch_selected_routes = []
 
+            scoring_start = time.perf_counter()
             for row_idx in range(input_ids.shape[0]):
                 positions = torch.nonzero(prefix_mask[row_idx], as_tuple=False).flatten()
                 if positions.numel() == 0:
@@ -608,12 +645,17 @@ class DataParallelPPOActor(BasePPOActor):
                     batch_raw_scores.append(0.0)
                     batch_score_maxes.append(0.0)
                     batch_score_means.append(0.0)
+                    batch_selected_overlaps.append(0.0)
+                    batch_overlap_maxes.append(0.0)
+                    batch_overlap_means.append(0.0)
+                    batch_selected_routes.append(-1)
                     continue
 
-                s_logits = logits[row_idx].index_select(0, positions)
-                s_logp = torch.log_softmax(s_logits, dim=-1)
+                s_logits = logits[row_idx].index_select(0, positions).float() / temperature
                 k = teacher_topk_ids.shape[-1]
-                s_vals, s_ids = torch.topk(s_logp, k=k, dim=-1)
+                s_top_logits, s_ids = torch.topk(s_logits, k=k, dim=-1)
+                s_log_norm = torch.logsumexp(s_logits, dim=-1, keepdim=True)
+                s_vals = s_top_logits - s_log_norm
                 t_ids = teacher_topk_ids[row_idx].index_select(0, positions).to(s_ids.device)
                 t_vals = teacher_topk_logp[row_idx].index_select(0, positions).to(s_vals.device)
 
@@ -621,10 +663,22 @@ class DataParallelPPOActor(BasePPOActor):
                 eq = s_ids.unsqueeze(-1).eq(t_ids.unsqueeze(-2)) & valid_teacher.unsqueeze(-2)
                 s_shared = eq.any(dim=-1)
                 t_shared = eq.any(dim=-2)
+                overlap_ratio = s_shared.float().sum(dim=-1) / float(k)
                 student_mass = (s_vals.exp() * s_shared).sum(dim=-1)
                 teacher_mass = (t_vals.exp() * t_shared * valid_teacher).sum(dim=-1)
                 scores = torch.minimum(student_mass, teacher_mass)
                 smoothed = self._moving_average_1d(scores, smooth_window)
+                overlap_smoothed = self._moving_average_1d(overlap_ratio, smooth_window)
+                overlap_forward_smoothed = self._forward_moving_average_1d(overlap_ratio, smooth_window)
+                shared_support_smoothed = smoothed * overlap_smoothed
+
+                s_top_p = torch.softmax(s_top_logits.float(), dim=-1)
+                s_entropy = -(s_top_p * s_top_p.clamp_min(1e-12).log()).sum(dim=-1)
+                t_top_p = t_vals.exp() * valid_teacher.float()
+                t_top_p = t_top_p / t_top_p.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+                t_entropy = -(t_top_p * t_top_p.clamp_min(1e-12).log()).sum(dim=-1)
+                entropy_agreement = torch.exp(-(s_entropy - t_entropy).abs())
+                overlap_entropy_smoothed = self._moving_average_1d(overlap_ratio * entropy_agreement, smooth_window)
 
                 start_idx = min(max(min_prefix_len - 1, 0), max(smoothed.numel() - 1, 0))
                 if selection_rule == "threshold":
@@ -640,35 +694,212 @@ class DataParallelPPOActor(BasePPOActor):
                             selected_idx = smoothed.numel() - 1
                         else:
                             selected_idx = int(torch.argmax(smoothed).item())
+                elif selection_rule == "longest_sufficient":
+                    score_max = smoothed.max()
+                    candidates = (smoothed >= near_max_ratio * score_max) & (overlap_smoothed >= overlap_threshold)
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[-1].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(smoothed[start_idx:]).item())
+                elif selection_rule == "earliest_overlap":
+                    candidates = overlap_smoothed >= overlap_threshold
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(smoothed[start_idx:]).item())
+                elif selection_rule == "earliest_relative_overlap":
+                    overlap_max = overlap_smoothed.max()
+                    candidates = overlap_smoothed >= near_max_ratio * overlap_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(overlap_smoothed[start_idx:]).item())
+                elif selection_rule == "earliest_relative_forward_overlap":
+                    overlap_max = overlap_forward_smoothed.max()
+                    candidates = overlap_forward_smoothed >= near_max_ratio * overlap_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(overlap_forward_smoothed[start_idx:]).item())
+                elif selection_rule == "earliest_relative_overlap_entropy_agreement":
+                    score_max = overlap_entropy_smoothed.max()
+                    candidates = overlap_entropy_smoothed >= near_max_ratio * score_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(overlap_entropy_smoothed[start_idx:]).item())
+                elif selection_rule == "earliest_relative_interaction_mass":
+                    score_max = smoothed.max()
+                    candidates = smoothed >= near_max_ratio * score_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(smoothed[start_idx:]).item())
+                elif selection_rule == "earliest_relative_bottleneck":
+                    relative_overlap = overlap_smoothed / overlap_smoothed.max().clamp_min(1e-12)
+                    relative_mass = smoothed / smoothed.max().clamp_min(1e-12)
+                    bottleneck_readiness = torch.minimum(relative_overlap, relative_mass)
+                    readiness_max = bottleneck_readiness.max()
+                    candidates = bottleneck_readiness >= near_max_ratio * readiness_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(bottleneck_readiness[start_idx:]).item())
+                elif selection_rule == "earliest_saturation_aware":
+                    overlap_max = overlap_smoothed.max()
+                    mass_max = smoothed.max()
+                    overlap_information = (overlap_max - overlap_smoothed.min()) / overlap_max.clamp_min(1e-12)
+                    mass_information = (mass_max - smoothed.min()) / mass_max.clamp_min(1e-12)
+                    use_mass_route = bool((mass_information > overlap_information).item())
+                    routed_scores = smoothed if use_mass_route else overlap_smoothed
+                    routed_max = routed_scores.max()
+                    candidates = routed_scores >= near_max_ratio * routed_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(routed_scores[start_idx:]).item())
+                elif selection_rule == "earliest_shared_support":
+                    score_max = shared_support_smoothed.max()
+                    candidates = shared_support_smoothed >= near_max_ratio * score_max
+                    if start_idx > 0:
+                        candidates[:start_idx] = False
+                    candidate_indices = torch.nonzero(candidates, as_tuple=False).flatten()
+                    if candidate_indices.numel() > 0:
+                        selected_idx = int(candidate_indices[0].item())
+                    elif fallback == "zero":
+                        selected_idx = -1
+                    elif fallback == "max":
+                        selected_idx = smoothed.numel() - 1
+                    else:
+                        selected_idx = start_idx + int(torch.argmax(shared_support_smoothed[start_idx:]).item())
                 else:
                     selected_idx = start_idx + int(torch.argmax(smoothed[start_idx:]).item())
 
+                if selection_rule == "earliest_shared_support":
+                    logged_scores = shared_support_smoothed
+                elif selection_rule == "earliest_relative_overlap":
+                    logged_scores = overlap_smoothed
+                elif selection_rule == "earliest_relative_forward_overlap":
+                    logged_scores = overlap_forward_smoothed
+                elif selection_rule == "earliest_relative_overlap_entropy_agreement":
+                    logged_scores = overlap_entropy_smoothed
+                elif selection_rule == "earliest_relative_bottleneck":
+                    logged_scores = bottleneck_readiness
+                elif selection_rule == "earliest_saturation_aware":
+                    logged_scores = routed_scores
+                else:
+                    logged_scores = smoothed
                 if selected_idx < 0:
                     selected_len = 0
                     selected_score = 0.0
                     raw_score = 0.0
+                    selected_overlap = 0.0
                 else:
                     selected_len = selected_idx + 1
-                    selected_score = float(smoothed[selected_idx].detach().cpu())
+                    selected_score = float(logged_scores[selected_idx].detach().cpu())
                     raw_score = float(scores[selected_idx].detach().cpu())
+                    selected_overlap_values = (
+                        overlap_forward_smoothed
+                        if selection_rule == "earliest_relative_forward_overlap"
+                        else overlap_smoothed
+                    )
+                    selected_overlap = float(selected_overlap_values[selected_idx].detach().cpu())
 
                 batch_selected_lens.append(selected_len)
                 batch_selected_scores.append(selected_score)
                 batch_raw_scores.append(raw_score)
-                batch_score_maxes.append(float(smoothed.max().detach().cpu()))
-                batch_score_means.append(float(smoothed.mean().detach().cpu()))
+                finite_logged_scores = logged_scores[torch.isfinite(logged_scores)]
+                batch_score_maxes.append(float(finite_logged_scores.max().detach().cpu()))
+                batch_score_means.append(float(finite_logged_scores.mean().detach().cpu()))
+                batch_selected_overlaps.append(selected_overlap)
+                logged_overlaps = (
+                    overlap_forward_smoothed
+                    if selection_rule == "earliest_relative_forward_overlap"
+                    else overlap_smoothed
+                )
+                finite_logged_overlaps = logged_overlaps[torch.isfinite(logged_overlaps)]
+                batch_overlap_maxes.append(float(finite_logged_overlaps.max().detach().cpu()))
+                batch_overlap_means.append(float(finite_logged_overlaps.mean().detach().cpu()))
+                batch_selected_routes.append(int(use_mass_route) if selection_rule == "earliest_saturation_aware" else -1)
+            if self.device_name == "cuda":
+                torch.cuda.synchronize()
+            scoring_time_s += time.perf_counter() - scoring_start
 
             selected_lens.append(torch.tensor(batch_selected_lens, dtype=torch.long, device=input_ids.device))
             selected_scores.append(torch.tensor(batch_selected_scores, dtype=torch.float32, device=input_ids.device))
             raw_scores_at_selected.append(torch.tensor(batch_raw_scores, dtype=torch.float32, device=input_ids.device))
             score_maxes.append(torch.tensor(batch_score_maxes, dtype=torch.float32, device=input_ids.device))
             score_means.append(torch.tensor(batch_score_means, dtype=torch.float32, device=input_ids.device))
+            selected_overlaps.append(torch.tensor(batch_selected_overlaps, dtype=torch.float32, device=input_ids.device))
+            overlap_maxes.append(torch.tensor(batch_overlap_maxes, dtype=torch.float32, device=input_ids.device))
+            overlap_means.append(torch.tensor(batch_overlap_means, dtype=torch.float32, device=input_ids.device))
+            selected_routes.append(torch.tensor(batch_selected_routes, dtype=torch.long, device=input_ids.device))
 
         selected_lens = torch.cat(selected_lens, dim=0)
         selected_scores = torch.cat(selected_scores, dim=0)
         raw_scores_at_selected = torch.cat(raw_scores_at_selected, dim=0)
         score_maxes = torch.cat(score_maxes, dim=0)
         score_means = torch.cat(score_means, dim=0)
+        selected_overlaps = torch.cat(selected_overlaps, dim=0)
+        overlap_maxes = torch.cat(overlap_maxes, dim=0)
+        overlap_means = torch.cat(overlap_means, dim=0)
+        selected_routes = torch.cat(selected_routes, dim=0)
 
         if use_dynamic_bsz:
             selected_lens = restore_dynamic_batch(selected_lens, batch_idx_list)
@@ -676,6 +907,10 @@ class DataParallelPPOActor(BasePPOActor):
             raw_scores_at_selected = restore_dynamic_batch(raw_scores_at_selected, batch_idx_list)
             score_maxes = restore_dynamic_batch(score_maxes, batch_idx_list)
             score_means = restore_dynamic_batch(score_means, batch_idx_list)
+            selected_overlaps = restore_dynamic_batch(selected_overlaps, batch_idx_list)
+            overlap_maxes = restore_dynamic_batch(overlap_maxes, batch_idx_list)
+            overlap_means = restore_dynamic_batch(overlap_means, batch_idx_list)
+            selected_routes = restore_dynamic_batch(selected_routes, batch_idx_list)
 
         return DataProto.from_dict(
             tensors={
@@ -684,6 +919,12 @@ class DataParallelPPOActor(BasePPOActor):
                 "online_prefix_selected_score_raw": raw_scores_at_selected,
                 "online_prefix_score_max": score_maxes,
                 "online_prefix_score_mean": score_means,
+                "online_prefix_selected_overlap": selected_overlaps,
+                "online_prefix_overlap_max": overlap_maxes,
+                "online_prefix_overlap_mean": overlap_means,
+                "online_prefix_selected_route": selected_routes,
+                "online_prefix_forward_time_s": torch.full_like(selected_scores, float(forward_time_s)),
+                "online_prefix_scoring_time_s": torch.full_like(selected_scores, float(scoring_time_s)),
             }
         )
 
@@ -1246,7 +1487,8 @@ class DataParallelPPOActor(BasePPOActor):
                             )
                             teacher_prefix_top_k_log_probs = full_teacher_prefix_top_k_log_probs
 
-                        token_mask = teacher_prefix_soft_kl_mask > 0
+                        valid_teacher_targets = torch.isfinite(teacher_prefix_top_k_log_probs).any(dim=-1)
+                        token_mask = (teacher_prefix_soft_kl_mask > 0) & valid_teacher_targets
                         safe_teacher_logp = torch.where(
                             token_mask.unsqueeze(-1),
                             teacher_prefix_top_k_log_probs,
@@ -1267,9 +1509,9 @@ class DataParallelPPOActor(BasePPOActor):
                         prefix_soft_kl_per_token = torch.sum(
                             teacher_probs * (teacher_logp_norm - student_logp_norm), dim=-1
                         )
-                        if teacher_prefix_soft_kl_mask.sum() > 0:
+                        if token_mask.sum() > 0:
                             teacher_prefix_soft_kl_loss = verl_F.masked_mean(
-                                prefix_soft_kl_per_token, teacher_prefix_soft_kl_mask
+                                prefix_soft_kl_per_token, token_mask.to(prefix_soft_kl_per_token.dtype)
                             )
                         else:
                             teacher_prefix_soft_kl_loss = teacher_prefix_student_top_k_log_probs.sum() * 0.0

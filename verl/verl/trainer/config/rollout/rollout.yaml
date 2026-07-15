@@ -104,6 +104,8 @@ online_prefix_selection:
   selection_rule: argmax
   min_prefix_len: 0
   threshold: 0.6
+  near_max_ratio: 0.99
+  overlap_threshold: 0.4
   fallback: argmax
 
 # disable logging statistics
