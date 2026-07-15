@@ -1,5 +1,25 @@
 # OPD Experiment Records
 
+## Default Qwen3 Base Protocol (2026-07-15 onward)
+
+Unless an ablation explicitly states otherwise, new Qwen3 Base experiments use:
+
+```text
+chat template: official checkpoint template
+enable_thinking: True
+training shuffle: True
+training data seed: 42
+global batch: 96
+evaluation data: scripts/val/data
+evaluation n: 16
+evaluation max tokens: 16384
+teacher-prefix representation: generated teacher_prefix_token_ids
+```
+
+For paired method or model-scale comparisons, keep the dataset, seed, batch size,
+epoch count, and resulting sampler permutation identical. Do not reuse old
+no-thinking prefix data in a thinking-enabled experiment.
+
 ## 2026-06-27: Top50 n=1 Ablation
 
 ### Setup

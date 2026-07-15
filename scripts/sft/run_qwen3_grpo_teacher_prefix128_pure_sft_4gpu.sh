@@ -44,6 +44,11 @@ export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 export MAX_LENGTH=${MAX_LENGTH:-2048}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
 export MICRO_BATCH_SIZE_PER_GPU=${MICRO_BATCH_SIZE_PER_GPU:-1}
+export DATA_SEED=${DATA_SEED:-42}
+export ENABLE_THINKING=${ENABLE_THINKING:-False}
+export USE_GENERATED_TOKEN_IDS=${USE_GENERATED_TOKEN_IDS:-False}
+export GENERATED_TOKEN_IDS_COLUMN=${GENERATED_TOKEN_IDS_COLUMN:-teacher_prefix_token_ids}
+export EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-15000}
 export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-Base}
 export SOURCE_PREFIX_DATA=${SOURCE_PREFIX_DATA:-datasets/teacher_prefix/qwen3_grpo_dapo_math_17k_teacher_prefix128.parquet}
 export SFT_DATASET=${SFT_DATASET:-datasets/sft/qwen3_grpo_teacher_prefix128_pure_sft.parquet}
@@ -51,8 +56,26 @@ export RESPONSE_COLUMN=${RESPONSE_COLUMN:-teacher_prefix_text}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_grpo_teacher_prefix128_pure_sft_lr${LR}}
 export CKPT_PATH=${CKPT_PATH:-checkpoint/${EXPERIMENT_NAME}_$(date +%Y-%m-%d_%H-%M-%S)}
 export MODEL_NAME=${MODEL_NAME:-qwen3_grpo_teacher_prefix128_pure_sft_lr${LR}}
-export OUTPUT_DIR=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_15000
+export OUTPUT_DIR=${OUTPUT_DIR:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_15000}
 export DATA_DIR=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data
+
+case "${ENABLE_THINKING,,}" in
+    true) THINKING_ARG=(--enable-thinking); EVAL_THINKING_ARG=--enable-thinking ;;
+    false) THINKING_ARG=(); EVAL_THINKING_ARG=--disable-thinking ;;
+    *) echo "ENABLE_THINKING must be True or False" >&2; exit 1 ;;
+esac
+case "${USE_GENERATED_TOKEN_IDS,,}" in
+    true)
+        TOKEN_ID_ARG=(--use-generated-token-ids)
+        CUSTOM_DATASET_ARGS=(
+            data.multiturn.enable=False
+            data.custom_cls.path=scripts/sft/precomputed_token_sft_dataset.py
+            data.custom_cls.name=PrecomputedTokenSFTDataset
+        )
+        ;;
+    false) TOKEN_ID_ARG=(); CUSTOM_DATASET_ARGS=(data.multiturn.enable=True) ;;
+    *) echo "USE_GENERATED_TOKEN_IDS must be True or False" >&2; exit 1 ;;
+esac
 
 if [ ! -f "$SOURCE_PREFIX_DATA" ]; then
     echo "Missing source teacher-prefix data: $SOURCE_PREFIX_DATA" >&2
@@ -64,7 +87,10 @@ python scripts/sft/make_teacher_prefix_sft_data.py \
     --output "$SFT_DATASET" \
     --tokenizer "$ACTOR_MODEL_PATH" \
     --response-column "$RESPONSE_COLUMN" \
-    --max-length "$MAX_LENGTH"
+    --generated-token-ids-column "$GENERATED_TOKEN_IDS_COLUMN" \
+    --max-length "$MAX_LENGTH" \
+    "${THINKING_ARG[@]}" \
+    "${TOKEN_ID_ARG[@]}"
 
 EXPECTED_STEPS=$(/root/miniconda3/envs/verl/bin/python -c "import pandas as pd; n=len(pd.read_parquet('${SFT_DATASET}')); bs=${TRAIN_BATCH_SIZE}; ep=${TOTAL_EPOCHS}; print(max(1, (n // bs) * ep))")
 echo "EXPECTED_STEPS: ${EXPECTED_STEPS}"
@@ -76,7 +102,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$N_GPUS_PER_NODE" \
     data.val_files="$SFT_DATASET" \
     data.train_max_samples=-1 \
     data.val_max_samples=256 \
-    data.multiturn.enable=True \
+    "${CUSTOM_DATASET_ARGS[@]}" \
     data.multiturn.messages_key=messages \
     data.multiturn.enable_thinking_key=enable_thinking \
     data.max_length="$MAX_LENGTH" \
@@ -95,6 +121,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="$N_GPUS_PER_NODE" \
     trainer.project_name=OnPolicyDistillation \
     trainer.experiment_name="$EXPERIMENT_NAME" \
     trainer.total_epochs="$TOTAL_EPOCHS" \
+    trainer.seed="$DATA_SEED" \
     trainer.save_freq=100 \
     trainer.test_freq=-1 \
     trainer.logger='["console","tensorboard"]' \
@@ -138,11 +165,11 @@ python scripts/val/eval/gen_vllm.py \
     --output-dir "$OUTPUT_DIR" \
     --tasks AIME24,AIME25,AMC23 \
     --n 16 \
-    --max-tokens 15000 \
+    --max-tokens "$EVAL_MAX_TOKENS" \
     --temperature 0.7 \
     --top-p 0.95 \
     --gpus "$EVAL_GPUS" \
-    --disable-thinking
+    "$EVAL_THINKING_ARG"
 
 python scripts/val/eval/grade.py \
     --eval-dir "$EVAL_DIR"

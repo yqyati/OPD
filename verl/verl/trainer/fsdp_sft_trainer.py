@@ -172,7 +172,12 @@ class FSDPSFTTrainer:
         device_name = get_device_name()
 
         self.train_sampler = DistributedSampler(
-            self.train_dataset, shuffle=True, num_replicas=world_size, rank=rank, drop_last=True
+            self.train_dataset,
+            shuffle=True,
+            num_replicas=world_size,
+            rank=rank,
+            drop_last=True,
+            seed=int(self.config.trainer.seed),
         )
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,

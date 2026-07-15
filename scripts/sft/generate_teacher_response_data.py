@@ -114,12 +114,14 @@ def main() -> None:
                     record = {
                         "__teacher_response_row_id": idx,
                         "teacher_response_text": generated.text,
+                        "teacher_response_token_ids": [int(token_id) for token_id in generated.token_ids],
                         "teacher_response_token_len": len(generated.token_ids),
                         "teacher_response_finish_reason": str(generated.finish_reason),
                         "teacher_response_model": args.teacher_model,
                         "teacher_response_max_tokens": args.max_new_tokens,
                         "teacher_response_temperature": args.temperature,
                         "teacher_response_top_p": args.top_p,
+                        "teacher_response_enable_thinking": bool(args.enable_thinking),
                     }
                     f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f_out.flush()
