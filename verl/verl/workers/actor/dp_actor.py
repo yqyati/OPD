@@ -1502,12 +1502,12 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_logp_norm = safe_teacher_logp - torch.logsumexp(
                             safe_teacher_logp, dim=-1, keepdim=True
                         )
-                        student_logp_norm = safe_student_logp - torch.logsumexp(
-                            safe_student_logp, dim=-1, keepdim=True
-                        )
                         teacher_probs = torch.exp(teacher_logp_norm)
+                        # Student values are gathered from the full-vocabulary
+                        # log-softmax. Keep that normalization so probability
+                        # mass outside the teacher top-k remains penalized.
                         prefix_soft_kl_per_token = torch.sum(
-                            teacher_probs * (teacher_logp_norm - student_logp_norm), dim=-1
+                            teacher_probs * (teacher_logp_norm - safe_student_logp), dim=-1
                         )
                         if token_mask.sum() > 0:
                             teacher_prefix_soft_kl_loss = verl_F.masked_mean(

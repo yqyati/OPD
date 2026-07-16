@@ -92,8 +92,8 @@ export GRPO_OUTCOME_WEIGHT=1.0
 
 # Qwen3 math-only OPD setting.
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
-export MAX_RESP_LENGTH=7168  # TODO: 31744 /15360 / 7168 / 4096 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=7168 # Trainer validation is disabled; final eval below uses EVAL_MAX_TOKENS.
+export MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-7168}  # TODO: 31744 /15360 / 7168 / 4096 / 3072 / 5120
+export MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-$MAX_RESP_LENGTH} # Trainer validation is disabled; final eval below uses EVAL_MAX_TOKENS.
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # Must be divisible by the GPU data-parallel size.
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)

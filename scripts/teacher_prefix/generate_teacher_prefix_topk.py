@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--use-generated-token-ids", action="store_true")
     return parser.parse_args()
 
 
@@ -64,12 +65,6 @@ def main() -> None:
 
     pending = []
     for row_idx, row in tqdm(list(df.iterrows()), desc="prepare prompts"):
-        teacher_prefix = get_teacher_prefix_text(row)
-        if not teacher_prefix:
-            pending.append((row_idx, None))
-            skipped_empty += 1
-            continue
-
         messages = normalize_prompt(row["prompt"])
         base_prompt = tokenizer.apply_chat_template(
             messages,
@@ -77,9 +72,27 @@ def main() -> None:
             tokenize=False,
             enable_thinking=args.enable_thinking,
         )
-        raw_prompt = base_prompt + teacher_prefix
         base_ids = tokenizer.encode(base_prompt, add_special_tokens=False)
-        full_ids = tokenizer.encode(raw_prompt, add_special_tokens=False)
+        if args.use_generated_token_ids:
+            prefix_ids = row.get("teacher_prefix_token_ids")
+            if hasattr(prefix_ids, "tolist"):
+                prefix_ids = prefix_ids.tolist()
+            if prefix_ids is None:
+                raise RuntimeError("teacher_prefix_token_ids is required with --use-generated-token-ids")
+            prefix_ids = [int(token_id) for token_id in prefix_ids]
+            if not prefix_ids:
+                pending.append((row_idx, None))
+                skipped_empty += 1
+                continue
+            full_ids = base_ids + prefix_ids
+        else:
+            teacher_prefix = get_teacher_prefix_text(row)
+            if not teacher_prefix:
+                pending.append((row_idx, None))
+                skipped_empty += 1
+                continue
+            raw_prompt = base_prompt + teacher_prefix
+            full_ids = tokenizer.encode(raw_prompt, add_special_tokens=False)
         start = len(base_ids) - 1
         end = len(full_ids) - 1
         if start >= end:
@@ -127,6 +140,7 @@ def main() -> None:
     out_df = df.copy()
     out_df["teacher_prefix_top_k_ids"] = topk_ids_col
     out_df["teacher_prefix_top_k_log_probs"] = topk_logp_col
+    out_df["teacher_prefix_top_k_uses_generated_token_ids"] = bool(args.use_generated_token_ids)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_parquet(output, index=False)
@@ -136,6 +150,7 @@ def main() -> None:
     print(f"skipped empty/no-prefix: {skipped_empty}")
     print(f"skipped over max_length={args.max_length}: {skipped_long}")
     print(f"top_k: {args.top_k}")
+    print(f"uses generated token ids: {args.use_generated_token_ids}")
     print(f"wrote: {output}")
 
 
