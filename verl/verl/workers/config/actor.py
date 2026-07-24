@@ -73,6 +73,7 @@ class ActorConfig(BaseConfig):
         loss_agg_mode (str): Loss aggregation mode. Options: 'token-mean', 'sample-mean'.
         entropy_coeff (float): Entropy coefficient for regularization.
         teacher_prefix_sft_loss_coef (float): Auxiliary hard SFT loss coefficient for teacher-prefix tokens.
+        teacher_prefix_sft_loss_agg_mode (str): Aggregation for teacher-prefix SFT loss.
         teacher_prefix_soft_kl_loss_coef (float): Auxiliary soft forward-KL coefficient for teacher-prefix tokens.
         use_kl_loss (bool): Whether to use KL divergence loss.
         use_torch_compile (bool): Whether to use torch.compile for optimization.
@@ -109,6 +110,7 @@ class ActorConfig(BaseConfig):
     loss_agg_mode: str = "token-mean"
     entropy_coeff: float = 0
     teacher_prefix_sft_loss_coef: float = 0.0
+    teacher_prefix_sft_loss_agg_mode: str = "token-mean"
     teacher_prefix_soft_kl_loss_coef: float = 0.0
     use_kl_loss: bool = False
     use_torch_compile: bool = True
@@ -150,6 +152,11 @@ class ActorConfig(BaseConfig):
         ]
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
+        if self.teacher_prefix_sft_loss_agg_mode not in {"token-mean", "seq-mean-token-mean"}:
+            raise ValueError(
+                "Invalid teacher_prefix_sft_loss_agg_mode: "
+                f"{self.teacher_prefix_sft_loss_agg_mode}"
+            )
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""

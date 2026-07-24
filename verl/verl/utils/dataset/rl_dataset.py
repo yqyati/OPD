@@ -517,7 +517,15 @@ class RLHFDataset(Dataset):
                 teacher_prefix_token_ids = self.tokenizer.encode(
                     _get_teacher_prefix_text(row_dict), add_special_tokens=False
                 )
+            teacher_prefix_is_complete = False
             if teacher_prefix_token_ids is not None and self.teacher_prefix_max_len > 0:
+                # A stopped teacher trace that fits entirely inside the requested
+                # prefix has already answered the problem. Keep it as a pure SFT
+                # target instead of treating its EOS as a student rollout prompt.
+                teacher_prefix_is_complete = (
+                    row_dict.get("teacher_prefix_finish_reason") == "stop"
+                    and len(teacher_prefix_token_ids) <= self.teacher_prefix_max_len
+                )
                 teacher_prefix_token_ids = teacher_prefix_token_ids[: self.teacher_prefix_max_len]
             if teacher_prefix_token_ids is not None:
                 full_prompt_ids = base_prompt_ids + teacher_prefix_token_ids
@@ -591,7 +599,22 @@ class RLHFDataset(Dataset):
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
         row_dict["teacher_prefix_sft_mask"] = teacher_prefix_sft_mask
-        row_dict["opd_loss_mask"] = torch.tensor(float(row_dict.get("opd_loss_mask", 1.0)), dtype=torch.float32)
+        if "teacher_prefix_is_complete" not in locals():
+            teacher_prefix_is_complete = False
+        # Keep the dataset-provided OPD eligibility separate from the prefix
+        # completion decision. Online prefix selection may shorten a trace
+        # after this dataset item has been built and must recompute completion.
+        base_opd_loss_mask = float(row_dict.get("opd_loss_mask", 1.0))
+        row_dict["teacher_prefix_base_opd_loss_mask"] = torch.tensor(
+            base_opd_loss_mask, dtype=torch.float32
+        )
+        row_dict["teacher_prefix_is_complete"] = torch.tensor(
+            float(teacher_prefix_is_complete), dtype=torch.float32
+        )
+        row_dict["opd_loss_mask"] = torch.tensor(
+            base_opd_loss_mask * float(not teacher_prefix_is_complete),
+            dtype=torch.float32,
+        )
         if "teacher_prefix_top_k_ids" in row_dict and "teacher_prefix_top_k_log_probs" in row_dict:
             topk_ids = row_dict["teacher_prefix_top_k_ids"]
             topk_log_probs = row_dict["teacher_prefix_top_k_log_probs"]

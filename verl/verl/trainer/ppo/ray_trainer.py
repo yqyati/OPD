@@ -574,11 +574,24 @@ class RayPPOTrainer:
         new_raw_prompt_ids = [] if raw_prompt_ids is not None else None
         original_lens = []
         clipped_lens = []
+        original_prefix_complete = batch.batch.get("teacher_prefix_is_complete", None)
+        base_opd_loss_mask = batch.batch.get("teacher_prefix_base_opd_loss_mask", None)
+        updated_prefix_complete = []
+        updated_opd_loss_mask = []
 
         for row_idx in range(batch_size):
             valid_positions = torch.nonzero(attention_mask[row_idx] > 0, as_tuple=False).flatten()
             prefix_positions = torch.nonzero(teacher_prefix_sft_mask[row_idx] > 0, as_tuple=False).flatten()
             if valid_positions.numel() == 0 or prefix_positions.numel() == 0:
+                was_complete = bool(
+                    original_prefix_complete is not None and original_prefix_complete[row_idx].item() > 0.5
+                )
+                if base_opd_loss_mask is None:
+                    base_mask = 1.0
+                else:
+                    base_mask = float(base_opd_loss_mask[row_idx].item())
+                updated_prefix_complete.append(float(was_complete))
+                updated_opd_loss_mask.append(base_mask * float(not was_complete))
                 if new_raw_prompt_ids is not None:
                     new_raw_prompt_ids.append(list(raw_prompt_ids[row_idx]))
                 original_lens.append(0)
@@ -589,6 +602,23 @@ class RayPPOTrainer:
             selected_len = int(max(0, min(int(selected_lens[row_idx].item()), prefix_len)))
             original_lens.append(prefix_len)
             clipped_lens.append(selected_len)
+
+            # The dataset initially determines completion using its full
+            # teacher_prefix_max_len. Once we shorten a prefix online, a trace
+            # that finished at (for example) token 600 is no longer complete
+            # when only the first 128 tokens are supplied to the student.
+            was_complete = bool(
+                original_prefix_complete is not None and original_prefix_complete[row_idx].item() > 0.5
+            )
+            is_complete = was_complete and selected_len >= prefix_len
+            if base_opd_loss_mask is None:
+                # Legacy datasets did not retain this value. Their historical
+                # default is one; new dataset rows always provide it.
+                base_mask = 1.0
+            else:
+                base_mask = float(base_opd_loss_mask[row_idx].item())
+            updated_prefix_complete.append(float(is_complete))
+            updated_opd_loss_mask.append(base_mask * float(not is_complete))
 
             # teacher_prefix_sft_mask marks logits positions that predict prefix
             # tokens. If its first position is base_len - 1, then keeping l
@@ -638,6 +668,20 @@ class RayPPOTrainer:
             batch.batch["teacher_prefix_top_k_log_probs"] = teacher_prefix_top_k_log_probs
         if new_raw_prompt_ids is not None:
             batch.non_tensor_batch["raw_prompt_ids"] = np.array(new_raw_prompt_ids, dtype=object)
+
+        if original_prefix_complete is not None:
+            batch.batch["teacher_prefix_is_complete"] = torch.tensor(
+                updated_prefix_complete,
+                dtype=original_prefix_complete.dtype,
+                device=original_prefix_complete.device,
+            )
+        if "opd_loss_mask" in batch.batch.keys():
+            original_opd_loss_mask = batch.batch["opd_loss_mask"]
+            batch.batch["opd_loss_mask"] = torch.tensor(
+                updated_opd_loss_mask,
+                dtype=original_opd_loss_mask.dtype,
+                device=original_opd_loss_mask.device,
+            )
 
         batch.batch["online_prefix_selected_len"] = selection.batch["online_prefix_selected_len"]
         batch.batch["online_prefix_selected_score"] = selection.batch["online_prefix_selected_score"]
@@ -691,6 +735,92 @@ class RayPPOTrainer:
     def _maybe_apply_online_prefix_selection(self, batch: DataProto, metrics: dict, timing_raw: dict) -> None:
         if not self._online_prefix_selection_enabled():
             return
+        online_cfg = self.config.actor_rollout_ref.rollout.get("online_prefix_selection")
+        selection_rule = online_cfg.get("selection_rule", "argmax")
+
+        # A parameter-free global baseline: reduce the available teacher
+        # scaffold linearly over the fixed training horizon.  It deliberately
+        # bypasses teacher/student logit scoring and therefore needs no top-k
+        # cache or additional actor forward before rollout.
+        if selection_rule == "linear_prefix_curriculum":
+            start_len = int(online_cfg.get("curriculum_start_len", 1024))
+            end_len = int(online_cfg.get("curriculum_end_len", 0))
+            progress = (self.global_steps - 1) / max(self.total_training_steps - 1, 1)
+            target_len = int(round(start_len + (end_len - start_len) * progress))
+            batch_size = len(batch)
+            selection = DataProto.from_dict(
+                tensors={
+                    "online_prefix_selected_len": torch.full((batch_size,), target_len, dtype=torch.long),
+                    "online_prefix_selected_score": torch.full((batch_size,), 1.0 - progress, dtype=torch.float32),
+                    "online_prefix_score_max": torch.ones((batch_size,), dtype=torch.float32),
+                    "online_prefix_score_mean": torch.full((batch_size,), 1.0 - progress, dtype=torch.float32),
+                }
+            )
+            self._apply_online_prefix_selection(batch, selection, metrics)
+            metrics["online_prefix/curriculum_target_len"] = float(target_len)
+            metrics["online_prefix/curriculum_progress"] = float(progress)
+            return
+
+        # A score-free control for dynamic-prefix experiments. Each sample
+        # independently chooses an integer prefix budget uniformly from zero
+        # through its available teacher-prefix length. The generator is seeded
+        # by the fixed data seed and global step for reproducible reruns.
+        if selection_rule == "random_uniform_prefix":
+            prefix_lens = (batch.batch["teacher_prefix_sft_mask"] > 0).sum(dim=-1).to(torch.long).cpu()
+            data_seed = int(self.config.data.get("seed", 0))
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(data_seed + int(self.global_steps))
+            selected_lens = torch.floor(
+                torch.rand(len(batch), generator=generator) * (prefix_lens.to(torch.float32) + 1.0)
+            ).to(torch.long)
+            selection = DataProto.from_dict(
+                tensors={
+                    "online_prefix_selected_len": selected_lens,
+                    "online_prefix_selected_score": torch.zeros(len(batch), dtype=torch.float32),
+                    "online_prefix_score_max": torch.zeros(len(batch), dtype=torch.float32),
+                    "online_prefix_score_mean": torch.zeros(len(batch), dtype=torch.float32),
+                }
+            )
+            self._apply_online_prefix_selection(batch, selection, metrics)
+            metrics["online_prefix/random_uniform_seed"] = float(data_seed + int(self.global_steps))
+            return
+
+        # A bounded score-free control. Unlike random_uniform_prefix, this
+        # samples only from explicit handoff budgets instead of all integer
+        # positions in the teacher trace. Short traces are clipped safely.
+        if selection_rule == "random_discrete_prefix":
+            prefix_lens = (batch.batch["teacher_prefix_sft_mask"] > 0).sum(dim=-1).to(torch.long).cpu()
+            candidate_lengths = [int(length) for length in online_cfg.get("discrete_prefix_lengths", [])]
+            if not candidate_lengths or any(length < 0 for length in candidate_lengths):
+                raise ValueError(
+                    "random_discrete_prefix requires a non-empty list of non-negative "
+                    "online_prefix_selection.discrete_prefix_lengths"
+                )
+
+            data_seed = int(self.config.data.get("seed", 0))
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(data_seed + int(self.global_steps))
+            candidates = torch.tensor(candidate_lengths, dtype=torch.long)
+            sampled_indices = torch.randint(len(candidates), (len(batch),), generator=generator)
+            requested_lens = candidates[sampled_indices]
+            selected_lens = torch.minimum(requested_lens, prefix_lens)
+            selection = DataProto.from_dict(
+                tensors={
+                    "online_prefix_selected_len": selected_lens,
+                    "online_prefix_selected_score": torch.zeros(len(batch), dtype=torch.float32),
+                    "online_prefix_score_max": torch.zeros(len(batch), dtype=torch.float32),
+                    "online_prefix_score_mean": torch.zeros(len(batch), dtype=torch.float32),
+                }
+            )
+            self._apply_online_prefix_selection(batch, selection, metrics)
+            metrics["online_prefix/random_discrete_seed"] = float(data_seed + int(self.global_steps))
+            metrics["online_prefix/random_discrete_requested_len_mean"] = float(requested_lens.float().mean().item())
+            metrics["online_prefix/random_discrete_selected_len_mean"] = float(selected_lens.float().mean().item())
+            metrics["online_prefix/random_discrete_clipped_fraction"] = float(
+                (requested_lens > prefix_lens).float().mean().item()
+            )
+            return
+
         required = {
             "teacher_prefix_sft_mask",
             "teacher_prefix_top_k_ids",
@@ -703,7 +833,6 @@ class RayPPOTrainer:
                 f"missing batch keys: {sorted(missing)}"
             )
 
-        online_cfg = self.config.actor_rollout_ref.rollout.get("online_prefix_selection")
         score_batch = batch.select(
             batch_keys=[
                 "input_ids",
@@ -1297,7 +1426,8 @@ class RayPPOTrainer:
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             with marked_timer("compute_log_prob", timing_raw, color="blue"):
                                 # First forward, get student top k ids and log probs
-                                print("First forward, get student top k ids and log probs")
+                                if os.environ.get("VERL_DEBUG_WORKER_LOGS") == "1":
+                                    print("First forward, get student top k ids and log probs")
                                 old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
 
                                 # if "entropys" in old_log_prob.batch.keys():

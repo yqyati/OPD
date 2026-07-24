@@ -223,6 +223,14 @@ if [ "$LR_SCHEDULER" = "cosine" ]; then
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03"
 fi
 
+if [ "${DISABLE_CUSTOM_REWARD_FUNCTION:-False}" = "True" ]; then
+    CUSTOM_REWARD_FUNCTION_ARGS="custom_reward_function=null"
+elif [ -n "${CUSTOM_REWARD_FUNCTION_PATH:-}" ]; then
+    CUSTOM_REWARD_FUNCTION_ARGS="custom_reward_function.path=${CUSTOM_REWARD_FUNCTION_PATH} custom_reward_function.name=${CUSTOM_REWARD_FUNCTION_NAME:-reward_func}"
+else
+    CUSTOM_REWARD_FUNCTION_ARGS='custom_reward_function.path=verl/verl/utils/reward_score/ttrl_math/__init__.py custom_reward_function.name=reward_func'
+fi
+
 PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((MAX_PROMPT_LENGTH + MAX_RESP_LENGTH) > 32768) ? (MAX_PROMPT_LENGTH + MAX_RESP_LENGTH) : 32768))
 export ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 export ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.9}
@@ -237,6 +245,10 @@ if [ ! -f "${TRAIN_DATASET}" ]; then
     exit 1
 fi
 
+if [ "${SKIP_MAX_FULL_PROMPT_LEN_CHECK:-False}" = "True" ]; then
+    MAX_FULL_PROMPT_LEN="skipped"
+    echo "SKIP_MAX_FULL_PROMPT_LEN_CHECK=True: relying on data.filter_overlong_prompts."
+else
 MAX_FULL_PROMPT_LEN=$(python3 - <<PY
 import pandas as pd
 from transformers import AutoTokenizer
@@ -268,9 +280,16 @@ if [ "${MAX_FULL_PROMPT_LEN}" -gt "${MAX_PROMPT_LENGTH}" ]; then
     echo "MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH} is smaller than max full prompt length ${MAX_FULL_PROMPT_LEN}; overlong samples will be filtered before training." >&2
     echo "For fewer filtered samples, set MAX_PROMPT_LENGTH to at least ${MAX_FULL_PROMPT_LEN}, preferably with several hundred tokens of buffer." >&2
 fi
+fi
 
 TRAIN_BATCH_SIZE=$((${MINI_BATCH_SIZE}*${PARALLEL_SIZE}))
-EXPECTED_STEPS=$(python3 -c "import pandas as pd; n=len(pd.read_parquet('${TRAIN_DATASET}')); bs=${TRAIN_BATCH_SIZE}; ep=${TOTAL_EPOCHS}; print(max(1, (n // bs) * ep))")
+EXPECTED_STEPS=$(python3 -c "import pyarrow.parquet as pq; n=pq.ParquetFile('${TRAIN_DATASET}').metadata.num_rows; bs=${TRAIN_BATCH_SIZE}; ep=${TOTAL_EPOCHS}; print(max(1, (n // bs) * ep))")
+if [ -n "${TOTAL_TRAINING_STEPS:-}" ]; then
+    EXPECTED_STEPS=${TOTAL_TRAINING_STEPS}
+    TOTAL_TRAINING_STEPS_ARGS="trainer.total_training_steps=${TOTAL_TRAINING_STEPS}"
+else
+    TOTAL_TRAINING_STEPS_ARGS=""
+fi
 MIN_SUCCESS_STEP=$(python3 -c "import math; print(math.ceil(${EXPECTED_STEPS} * 0.9))")
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 echo "ROLLOUT_MAX_NUM_BATCHED_TOKENS: $ROLLOUT_MAX_NUM_BATCHED_TOKENS"
@@ -354,8 +373,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.model.fsdp_config.param_offload=False \
     +reward_model.model.dtype=$MODEL_DTYPE \
     reward_model.micro_batch_size_per_gpu=$REWARD_MICRO_BATCH_SIZE_PER_GPU \
-    custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
-    custom_reward_function.name=reward_func \
+    $CUSTOM_REWARD_FUNCTION_ARGS \
     trainer.val_before_train=False \
     trainer.log_val_generations=2 \
     trainer.logger=['console','tensorboard'] \
@@ -367,6 +385,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=100 \
     trainer.test_freq=-1 \
     trainer.total_epochs=$TOTAL_EPOCHS \
+    $TOTAL_TRAINING_STEPS_ARGS \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT \
     ${EXTRA_PPO_ARGS:-}
@@ -419,6 +438,11 @@ fi
 if [ ! -f "${MODEL_DIR}/config.json" ]; then
     echo "Missing model config: ${MODEL_DIR}/config.json" >&2
     exit 1
+fi
+
+if [ "${SKIP_FINAL_EVAL:-False}" = "True" ]; then
+    echo "SKIP_FINAL_EVAL=True: merged checkpoint is ready; skipping the math-only final evaluator."
+    exit 0
 fi
 
 python scripts/val/eval/gen_vllm.py \

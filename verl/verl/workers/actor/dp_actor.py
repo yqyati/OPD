@@ -1163,7 +1163,8 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batches = data.split(micro_batch_size)
 
         top_k = data.meta_info.get("top_k", 0)
-        print(f"In compute_log_prob, top_k: {top_k}")
+        if os.environ.get("VERL_DEBUG_WORKER_LOGS") == "1":
+            print(f"In compute_log_prob, top_k: {top_k}")
         log_probs_lst = []
         entropy_lst = []
         topk_ids_lst = []
@@ -1445,6 +1446,9 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = pg_loss
 
                     if use_teacher_prefix_sft:
+                        teacher_prefix_sft_loss_agg_mode = self.config.get(
+                            "teacher_prefix_sft_loss_agg_mode", "token-mean"
+                        )
                         teacher_prefix_sft_mask = model_inputs["teacher_prefix_sft_mask"].to(full_log_probs.dtype)
                         if teacher_prefix_sft_mask.shape[-1] != full_log_probs.shape[-1]:
                             full_teacher_prefix_sft_mask = torch.zeros_like(full_log_probs)
@@ -1452,7 +1456,11 @@ class DataParallelPPOActor(BasePPOActor):
                             full_teacher_prefix_sft_mask[:, :prompt_mask_len] = teacher_prefix_sft_mask
                             teacher_prefix_sft_mask = full_teacher_prefix_sft_mask
                         if teacher_prefix_sft_mask.sum() > 0:
-                            teacher_prefix_sft_loss = -verl_F.masked_mean(full_log_probs, teacher_prefix_sft_mask)
+                            teacher_prefix_sft_loss = -agg_loss(
+                                loss_mat=full_log_probs,
+                                loss_mask=teacher_prefix_sft_mask,
+                                loss_agg_mode=teacher_prefix_sft_loss_agg_mode,
+                            )
                         else:
                             teacher_prefix_sft_loss = full_log_probs.sum() * 0.0
                         policy_loss = policy_loss + teacher_prefix_sft_loss_coef * teacher_prefix_sft_loss
@@ -1460,6 +1468,9 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_prefix_sft_loss.detach().item() * loss_scale_factor
                         )
                         micro_batch_metrics["actor/teacher_prefix_sft_loss_coef"] = teacher_prefix_sft_loss_coef
+                        micro_batch_metrics["actor/teacher_prefix_sft_loss_agg_mode"] = (
+                            0.0 if teacher_prefix_sft_loss_agg_mode == "token-mean" else 1.0
+                        )
 
                     if use_teacher_prefix_soft_kl:
                         teacher_prefix_soft_kl_mask = model_inputs["teacher_prefix_sft_mask"].to(

@@ -103,6 +103,9 @@ class OnlinePrefixSelectionConfig(BaseConfig):
     near_max_ratio: float = 0.99
     overlap_threshold: float = 0.4
     fallback: str = "argmax"
+    curriculum_start_len: int = 1024
+    curriculum_end_len: int = 0
+    discrete_prefix_lengths: list[int] = field(default_factory=lambda: [0, 64, 128, 256, 512])
 
 
 @dataclass

@@ -71,6 +71,10 @@ clip_ratio_c: 3.0
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
 loss_agg_mode: token-mean
 
+# Teacher-prefix CE aggregation. "seq-mean-token-mean" gives every sample
+# equal total prefix-CE weight when online selection yields variable lengths.
+teacher_prefix_sft_loss_agg_mode: token-mean
+
 # Entropy regularization coefficient in PPO loss
 entropy_coeff: 0
 

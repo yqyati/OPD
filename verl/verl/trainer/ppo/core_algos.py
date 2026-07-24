@@ -22,6 +22,7 @@ __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
 from collections import defaultdict
 from enum import Enum
+import os
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -1116,7 +1117,8 @@ def compute_policy_loss_vanilla(
     # This avoids storing the 3D ratio tensor, saving significant memory.
     #
     if log_prob.dim() == 3 and old_log_prob.dim() == 3:
-        print(f"Advantages shape: {advantages.shape}")
+        if os.environ.get("VERL_DEBUG_WORKER_LOGS") == "1":
+            print(f"Advantages shape: {advantages.shape}")
         
         # Standard PPO case adapted for 3D tensors (Top-K)
         # 1. Compute KL and Ratio (3D)

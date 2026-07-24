@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Any, Callable, Optional
@@ -73,7 +74,8 @@ async def parallel_compute_score_async(
                     terminated_count += 1
                 except Exception:
                     pass
-            print(f"[Shutdown] {terminated_count} subprocess(es) terminated.")
+            if os.environ.get("VERL_DEBUG_WORKER_LOGS") == "1":
+                print(f"[Shutdown] {terminated_count} subprocess(es) terminated.")
 
     # Process results
     for result, completion, reference, task in zip(results, completions, references, tasks, strict=True):

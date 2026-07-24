@@ -107,6 +107,9 @@ online_prefix_selection:
   near_max_ratio: 0.99
   overlap_threshold: 0.4
   fallback: argmax
+  curriculum_start_len: 1024
+  curriculum_end_len: 0
+  discrete_prefix_lengths: [0, 64, 128, 256, 512]
 
 # disable logging statistics
 disable_log_stats: True

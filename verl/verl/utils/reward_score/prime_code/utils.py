@@ -47,14 +47,25 @@ def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=Tru
     result = manager.list()
     metadata_list = manager.list()
     p = multiprocessing.Process(target=_temp_run, args=(in_outs, generation, debug, result, metadata_list, timeout))
-    p.start()
-    p.join(timeout=timeout + 1)
-    if p.is_alive():
-        p.kill()
-        # p.terminate()
-    if not result:
-        # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
-        if debug:
-            print("global timeout")
-    return result[0], metadata_list
+    try:
+        p.start()
+        p.join(timeout=timeout + 1)
+        if p.is_alive():
+            p.kill()
+            p.join()
+
+        if not result:
+            # Consider all tests failed when the worker timed out or crashed.
+            result_value = [-1 for _ in range(len(in_outs["inputs"]))]
+            if debug:
+                print("global timeout")
+        else:
+            result_value = result[0]
+        metadata_value = list(metadata_list)
+        return result_value, metadata_value
+    finally:
+        if p.is_alive():
+            p.kill()
+            p.join()
+        p.close()
+        manager.shutdown()
