@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # One matched study for the actual sequential selector:
 # 32 -> 64 -> 128 -> 256 -> 512, with teacher trajectories live at 512.
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

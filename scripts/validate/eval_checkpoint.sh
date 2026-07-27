@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
-PROJECT_ROOT="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD"
+PROJECT_ROOT="${OPD_ROOT}"
 cd "${PROJECT_ROOT}"
 
 export PYTHONPATH="${PROJECT_ROOT}/verl:${PYTHONPATH:-}"

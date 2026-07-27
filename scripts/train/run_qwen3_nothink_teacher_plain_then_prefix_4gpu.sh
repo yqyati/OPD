@@ -12,11 +12,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
+source .env
+
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 
 # Configure logging when running outside SBATCH.
 if [ -z "$SLURM_JOB_ID" ]; then
@@ -39,6 +41,11 @@ export ENABLE_THINKING=${ENABLE_THINKING:-False}
 export DATA_SHUFFLE=${DATA_SHUFFLE:-False}
 export DATA_SEED=${DATA_SEED:-42}
 export TEACHER_PREFIX_GENERATION_SCRIPT=${TEACHER_PREFIX_GENERATION_SCRIPT:-scripts/teacher_prefix/run_qwen3_base_teacher_prefix128_4gpu.sh}
+export STUDENT_CHAT_TEMPLATE_FILE=${STUDENT_CHAT_TEMPLATE_FILE:-}
+export TEACHER_PREFIX_MAX_LEN=${TEACHER_PREFIX_MAX_LEN:-0}
+export CANONICAL_EOS_TOKEN_ID=${CANONICAL_EOS_TOKEN_ID:-}
+export TEACHER_SOURCE_EOS_TOKEN_ID=${TEACHER_SOURCE_EOS_TOKEN_ID:-}
+export REWARD_MODEL_INPUT_TOKENIZER=${REWARD_MODEL_INPUT_TOKENIZER:-}
 
 case "${ENABLE_THINKING,,}" in
     true) CHAT_TEMPLATE_ENABLE_THINKING=True; EVAL_THINKING_ARG=--enable-thinking ;;
@@ -49,6 +56,38 @@ case "${ENABLE_THINKING,,}" in
         ;;
 esac
 export CHAT_TEMPLATE_ENABLE_THINKING
+
+DATA_TEMPLATE_ARGS=()
+EVAL_TEMPLATE_ARGS=()
+if [ -n "${STUDENT_CHAT_TEMPLATE_FILE}" ]; then
+    test -f "${STUDENT_CHAT_TEMPLATE_FILE}" || { echo "Missing student template: ${STUDENT_CHAT_TEMPLATE_FILE}" >&2; exit 1; }
+    DATA_TEMPLATE_ARGS+=(+data.apply_chat_template_kwargs.chat_template_file="${STUDENT_CHAT_TEMPLATE_FILE}")
+    EVAL_TEMPLATE_ARGS+=(--prompt-template-file "${STUDENT_CHAT_TEMPLATE_FILE}")
+fi
+
+PREFIX_EOS_ARGS=()
+ROLLOUT_EOS_ARGS=()
+EVAL_EOS_ARGS=()
+if [ -n "${CANONICAL_EOS_TOKEN_ID}" ] || [ -n "${TEACHER_SOURCE_EOS_TOKEN_ID}" ]; then
+    if [ -z "${CANONICAL_EOS_TOKEN_ID}" ] || [ -z "${TEACHER_SOURCE_EOS_TOKEN_ID}" ]; then
+        echo "CANONICAL_EOS_TOKEN_ID and TEACHER_SOURCE_EOS_TOKEN_ID must be set together." >&2
+        exit 1
+    fi
+    PREFIX_EOS_ARGS+=(
+        +data.teacher_prefix_canonical_eos_token_id="${CANONICAL_EOS_TOKEN_ID}"
+        +data.teacher_prefix_source_eos_token_id="${TEACHER_SOURCE_EOS_TOKEN_ID}"
+    )
+    ROLLOUT_EOS_ARGS+=(
+        +actor_rollout_ref.rollout.canonical_eos_token_id="${CANONICAL_EOS_TOKEN_ID}"
+        +actor_rollout_ref.rollout.teacher_source_eos_token_id="${TEACHER_SOURCE_EOS_TOKEN_ID}"
+    )
+    EVAL_EOS_ARGS+=(--stop-token-ids "${CANONICAL_EOS_TOKEN_ID}")
+fi
+
+REWARD_INPUT_TOKENIZER_ARG="reward_model.model.input_tokenizer=null"
+if [ -n "${REWARD_MODEL_INPUT_TOKENIZER}" ]; then
+    REWARD_INPUT_TOKENIZER_ARG="reward_model.model.input_tokenizer=${REWARD_MODEL_INPUT_TOKENIZER}"
+fi
 
 if [ "$RUN_MODE" = "sequence" ]; then
     echo "RUN_MODE=sequence: run plain OPD first, then generate no-think teacher prefix, then run prefix OPD."
@@ -168,7 +207,7 @@ TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B-RL
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B
 # export ACTOR_MODEL_PATH=model/Qwen2.5-Math-1.5B
-export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-Base}
+export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-${MODEL_ROOT}/Qwen3-1.7B-Base}
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B-step_0400
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-SFT
@@ -189,7 +228,7 @@ export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
 # export REWARD_MODEL_PATH=model/Skywork-OR1-Math-7B
 # export REWARD_MODEL_PATH=model/Polaris-4B-Preview
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-14B
-export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base}
+export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-${MODEL_ROOT}/Qwen3-4B-Base}
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
 export PROJECT_PATH=checkpoint
@@ -236,7 +275,7 @@ export ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-65536}
 export ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.9}
 export REWARD_MICRO_BATCH_SIZE_PER_GPU=${REWARD_MICRO_BATCH_SIZE_PER_GPU:-24}
 export EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-31744}
-export EVAL_OUTPUT_DIR=${EVAL_OUTPUT_DIR:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_31744}
+export EVAL_OUTPUT_DIR=${EVAL_OUTPUT_DIR:-${OPD_ROOT}/outputs/eval/justrl_eval_outputs_31744}
 if [ ! -f "${TRAIN_DATASET}" ]; then
     echo "Missing training dataset: ${TRAIN_DATASET}" >&2
     if [ "$RUN_MODE" = "prefix" ]; then
@@ -321,6 +360,9 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.return_raw_chat=True \
     +data.apply_chat_template_kwargs.enable_thinking=$CHAT_TEMPLATE_ENABLE_THINKING \
+    "${DATA_TEMPLATE_ARGS[@]}" \
+    +data.teacher_prefix_max_len=$TEACHER_PREFIX_MAX_LEN \
+    "${PREFIX_EOS_ARGS[@]}" \
     actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_activation_offload=False \
@@ -353,6 +395,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
     +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
+    "${ROLLOUT_EOS_ARGS[@]}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTILIZATION \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
@@ -368,7 +411,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.enable=True \
     +reward_model.reward_kwargs.enable_format_reward=$ENABLE_FORMAT_REWARD \
     reward_model.model.path=$REWARD_MODEL_PATH \
-    reward_model.model.input_tokenizer=null \
+    $REWARD_INPUT_TOKENIZER_ARG \
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=False \
     +reward_model.model.dtype=$MODEL_DTYPE \
@@ -414,8 +457,8 @@ if [ "${STEP}" -lt "${MIN_SUCCESS_STEP}" ]; then
 fi
 
 CKPT_DIR="${CKPT_PATH}/global_step_${STEP}/actor"
-MODEL_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/${MODEL_OUTPUT_NAME_PREFIX}_step${STEP}"
-DATA_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data"
+MODEL_DIR="${OPD_ROOT}/merged_models/${MODEL_OUTPUT_NAME_PREFIX}_step${STEP}"
+DATA_DIR="${OPD_ROOT}/scripts/val/data"
 OUTPUT_DIR="${EVAL_OUTPUT_DIR}"
 EVAL_DIR="${OUTPUT_DIR}/$(basename "${MODEL_DIR}")"
 
@@ -455,6 +498,8 @@ python scripts/val/eval/gen_vllm.py \
     --temperature 0.7 \
     --top-p 0.95 \
     --gpus "$EVAL_GPUS" \
+    "${EVAL_TEMPLATE_ARGS[@]}" \
+    "${EVAL_EOS_ARGS[@]}" \
     "$EVAL_THINKING_ARG"
 
 python scripts/val/eval/grade.py \

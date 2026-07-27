@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 PILOT_DIR="${ROOT}/OPD/datasets/group_opd_pilot/q3b_q4b_prefix128_n8_median_vs_random_seed42"

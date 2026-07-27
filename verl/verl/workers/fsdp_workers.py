@@ -60,6 +60,7 @@ from verl.utils.device import (
     get_torch_device,
     set_expandable_segments,
 )
+from verl.utils.eos_canonicalization import canonicalize_teacher_eos_logits_
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -1949,11 +1950,22 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         import_external_libs(self.config.model.get("external_lib", None))
         self.reward_module = self._build_model(config=self.config)
 
-    def _forward_micro_batch(self, micro_batch, student_top_k_ids=None, compute_entropy=False, top_k=0, strategy="only_stu", teacher_temperature=1.0):
+    def _forward_micro_batch(
+        self,
+        micro_batch,
+        student_top_k_ids=None,
+        compute_entropy=False,
+        top_k=0,
+        strategy="only_stu",
+        teacher_temperature=1.0,
+        canonical_eos_token_id=None,
+        teacher_source_eos_token_id=None,
+    ):
         from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
         from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs, ulysses_pad
         import verl.utils.torch_functional as verl_F
         response_length = micro_batch["responses"].size(-1)
+        response_prediction_mask = micro_batch.get("response_mask", None)
         with torch.no_grad(), torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
             batch_size, seqlen = input_ids.shape
@@ -2017,6 +2029,26 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     )
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
+                packed_response_prediction_mask = None
+                if response_prediction_mask is not None:
+                    full_response_prediction_mask = torch.zeros(
+                        (batch_size, seqlen), dtype=torch.bool, device=input_ids.device
+                    )
+                    valid_positions = torch.nonzero(response_prediction_mask, as_tuple=False)
+                    if len(valid_positions) > 0:
+                        full_response_prediction_mask[
+                            valid_positions[:, 0], seqlen - response_length - 1 + valid_positions[:, 1]
+                        ] = True
+                    packed_response_prediction_mask = index_first_axis(
+                        rearrange(full_response_prediction_mask.unsqueeze(-1), "b s ... -> (b s) ..."), indices
+                    ).squeeze(-1)
+                    if self.use_ulysses_sp:
+                        packed_response_prediction_mask, _, _ = ulysses_pad_and_slice_inputs(
+                            packed_response_prediction_mask.unsqueeze(-1),
+                            position_ids_rmpad=None,
+                            sp_size=self.ulysses_sequence_parallel_size,
+                        )
+                        packed_response_prediction_mask = packed_response_prediction_mask.squeeze(-1).bool()
                 output = self.reward_module(
                     input_ids=input_ids_rmpad,
                     attention_mask=None,
@@ -2040,6 +2072,12 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     logits_rmpad = output[0] if isinstance(output, tuple) else output.logits
                     logits_rmpad = logits_rmpad.squeeze(0)  # (total_nnz, vocab_size)
                     logits_rmpad = logits_rmpad.div_(teacher_temperature)
+                    canonicalize_teacher_eos_logits_(
+                        logits_rmpad,
+                        packed_response_prediction_mask,
+                        canonical_eos_token_id=canonical_eos_token_id,
+                        source_eos_token_id=teacher_source_eos_token_id,
+                    )
 
                     # Compute entropy if logits are available
                     # We compute entropy on the logits.
@@ -2274,6 +2312,12 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     rm_output_logits = output[0] if isinstance(output, tuple) else output.logits
                     rm_logits_resp = rm_output_logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     rm_logits_resp = rm_logits_resp.div_(teacher_temperature)
+                    canonicalize_teacher_eos_logits_(
+                        rm_logits_resp.reshape(-1, rm_logits_resp.size(-1)),
+                        response_prediction_mask.reshape(-1) if response_prediction_mask is not None else None,
+                        canonical_eos_token_id=canonical_eos_token_id,
+                        source_eos_token_id=teacher_source_eos_token_id,
+                    )
                     
                     # Compute entropy
                     if compute_entropy:
@@ -2395,186 +2439,74 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return DataProto.from_dict(rm_inputs)
 
     def _switch_chat_template_token_level(self, data: DataProto):
-        """Re-tokenize with the RM's chat template while preserving token-level alignment.
+        """Apply the teacher template while preserving student action token IDs.
 
-        Unlike _switch_chat_template (which uses right-padding for sequence-level RM),
-        this function uses LEFT-padding so that the response stays at the end of the
-        sequence. This ensures that `[-response_length-1:-1]` correctly targets the
-        response positions for token-level distillation (student_top_k_ids alignment).
-
-        Requirements: actor and reward model must share the same vocabulary.
+        Only prompts are re-rendered. Each sampled response is appended as its
+        original IDs, avoiding decode/re-tokenize boundary changes that would break
+        OPD's token-level alignment. Actor and teacher must share one vocabulary.
         """
         src_max_length = data.batch["attention_mask"].shape[-1]
-
         src_tokenizer = self.input_tokenizer
         target_tokenizer = self.tokenizer
+        if src_tokenizer.vocab_size != target_tokenizer.vocab_size:
+            raise ValueError(
+                "Token-level chat-template switching requires a shared vocabulary: "
+                f"actor={src_tokenizer.vocab_size}, teacher={target_tokenizer.vocab_size}."
+            )
 
-        is_debug = (self.rank == 0)  # only print on rank 0
-
-        if is_debug:
-            print(f"\n{'='*80}")
-            print(f"[DEBUG _switch_chat_template_token_level] START")
-            print(f"  src_tokenizer: {type(src_tokenizer).__name__}, vocab_size={src_tokenizer.vocab_size}")
-            print(f"  target_tokenizer: {type(target_tokenizer).__name__}, vocab_size={target_tokenizer.vocab_size}")
-            print(f"  src_max_length={src_max_length}")
-            print(f"  batch_size={data.batch.batch_size[0]}")
-            print(f"  original input_ids shape: {data.batch['input_ids'].shape}")
-            print(f"  original attention_mask shape: {data.batch['attention_mask'].shape}")
-            print(f"  original responses shape: {data.batch['responses'].shape}")
-            print(f"{'='*80}")
-
-        rm_input_ids = []
-        rm_attention_mask = []
-        rm_responses = []
-
+        rm_input_ids, rm_attention_mask = [], []
         for i in range(data.batch.batch_size[0]):
-            if not isinstance(data.non_tensor_batch["raw_prompt"][i], list | np.ndarray):
-                raise TypeError(
-                    f"raw_prompt must be a list or numpy array, got {type(data.non_tensor_batch['raw_prompt'][i])}"
-                )
+            chat = data.non_tensor_batch["raw_prompt"][i]
+            if not isinstance(chat, list | np.ndarray):
+                raise TypeError(f"raw_prompt must be a list or numpy array, got {type(chat)}")
 
-            # extract raw prompt
-            chat: list = list(data.non_tensor_batch["raw_prompt"][i])
-
-            # extract response
             response_ids = data.batch["responses"][i]
             response_length = response_ids.shape[-1]
-            valid_response_length = data.batch["attention_mask"][i][-response_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
+            valid_response_length = int(data.batch["attention_mask"][i][-response_length:].sum().item())
+            valid_response_ids = response_ids[:valid_response_length].detach().cpu()
 
-            # decode using the actor's tokenizer
-            response = src_tokenizer.decode(valid_response_ids)
-            # remove bos and eos
-            if src_tokenizer.eos_token:
-                response = response.replace(src_tokenizer.eos_token, "")
+            # Prefix token IDs are recovered from the actual student prompt,
+            # rather than decoded from parquet text. This preserves both the
+            # fixed-prefix boundary and any dataset-side EOS canonicalization.
+            prefix_ids = torch.empty(0, dtype=valid_response_ids.dtype)
+            if "teacher_prefix_sft_mask" in data.batch.keys():
+                prefix_prediction_positions = torch.nonzero(
+                    data.batch["teacher_prefix_sft_mask"][i] > 0,
+                    as_tuple=False,
+                ).flatten()
+                if prefix_prediction_positions.numel() > 0:
+                    prefix_token_positions = prefix_prediction_positions + 1
+                    prefix_ids = data.batch["input_ids"][i, prefix_token_positions].detach().cpu()
 
-            if is_debug and i == 0:
-                print(f"\n[DEBUG sample 0] --- Response decode/re-encode ---")
-                print(f"  original response_ids shape: {response_ids.shape}")
-                print(f"  response_length (padded): {response_length}")
-                print(f"  valid_response_length: {valid_response_length}")
-                print(f"  original response_ids (first 20): {valid_response_ids[:20].tolist()}")
-                print(f"  decoded response (first 200 chars): {response[:200]}")
-
-            chat.append({"role": "assistant", "content": response})
-
-            prompt_with_chat_template = target_tokenizer.apply_chat_template(
-                chat, add_generation_prompt=False, tokenize=False
+            teacher_prompt_ids = target_tokenizer.apply_chat_template(
+                list(chat), add_generation_prompt=True, tokenize=True
             )
-
-            if is_debug and i == 0:
-                print(f"  chat template applied (first 300 chars): {prompt_with_chat_template[:300]}")
-                print(f"  chat template applied (last 200 chars): {prompt_with_chat_template[-200:]}")
-
-            max_length = self.config.get("max_length", src_max_length)
-            if max_length is None:
-                max_length = src_max_length
-
-            model_inputs = target_tokenizer(prompt_with_chat_template, return_tensors="pt", add_special_tokens=False)
-
-            if is_debug and i == 0:
-                raw_len = model_inputs["input_ids"].shape[-1]
-                print(f"  re-tokenized length (before pad/trunc): {raw_len}")
-                print(f"  max_length for postprocess: {max_length}")
-
+            teacher_input_ids = torch.tensor(teacher_prompt_ids, dtype=valid_response_ids.dtype)
+            teacher_input_ids = torch.cat(
+                (teacher_input_ids, prefix_ids, valid_response_ids), dim=0
+            ).unsqueeze(0)
+            teacher_attention_mask = torch.ones_like(teacher_input_ids)
+            max_length = self.config.get("max_length", src_max_length) or src_max_length
             input_ids, attention_mask = verl_F.postprocess_data(
-                input_ids=model_inputs["input_ids"],
-                attention_mask=model_inputs["attention_mask"],
+                input_ids=teacher_input_ids,
+                attention_mask=teacher_attention_mask,
                 max_length=max_length,
                 pad_token_id=target_tokenizer.pad_token_id,
-                left_pad=True,  # LEFT padding to keep response at end
-                truncation=self.config.get("truncation", "left"),  # truncate prompt from left if needed
+                left_pad=True,
+                truncation=self.config.get("truncation", "left"),
             )
-
-            if is_debug and i == 0:
-                content_len = attention_mask.sum().item()
-                pad_len = max_length - content_len
-                # find where content starts (first non-pad position)
-                first_content_pos = (attention_mask.squeeze(0) == 1).nonzero(as_tuple=True)[0]
-                first_pos = first_content_pos[0].item() if len(first_content_pos) > 0 else -1
-                last_pos = first_content_pos[-1].item() if len(first_content_pos) > 0 else -1
-                print(f"  after postprocess: input_ids shape={input_ids.shape}")
-                print(f"  content_len={content_len}, pad_len={pad_len}")
-                print(f"  content range: [{first_pos}, {last_pos}]")
-                print(f"  last 10 input_ids: {input_ids.squeeze(0)[-10:].tolist()}")
-                print(f"  last 10 attn_mask: {attention_mask.squeeze(0)[-10:].tolist()}")
-
             rm_input_ids.append(input_ids)
             rm_attention_mask.append(attention_mask)
 
-            # Re-tokenize the response alone with the target tokenizer to get correct response_ids
-            response_inputs = target_tokenizer(response, return_tensors="pt", add_special_tokens=False)
-            new_response_ids = response_inputs["input_ids"].squeeze(0)  # (new_resp_len,)
-
-            if is_debug and i == 0:
-                print(f"\n[DEBUG sample 0] --- Response re-tokenization ---")
-                print(f"  new_response_ids length: {new_response_ids.shape[0]}")
-                print(f"  original valid_response_length: {valid_response_length}")
-                print(f"  target response_length (padded): {response_length}")
-                print(f"  new_response_ids (first 20): {new_response_ids[:20].tolist()}")
-                print(f"  orig valid_response_ids (first 20): {valid_response_ids[:20].tolist()}")
-                # Check token-by-token match
-                min_len = min(new_response_ids.shape[0], valid_response_ids.shape[0])
-                match_count = (new_response_ids[:min_len] == valid_response_ids[:min_len].cpu()).sum().item()
-                print(f"  token match in first {min_len} tokens: {match_count}/{min_len}")
-                if match_count < min_len:
-                    # Find first mismatch
-                    for j in range(min_len):
-                        if new_response_ids[j] != valid_response_ids[j].cpu():
-                            print(f"  FIRST MISMATCH at pos {j}: new={new_response_ids[j].item()} "
-                                  f"('{target_tokenizer.decode([new_response_ids[j].item()])}') vs "
-                                  f"orig={valid_response_ids[j].item()} "
-                                  f"('{src_tokenizer.decode([valid_response_ids[j].item()])}')")
-                            break
-
-            # Pad/truncate to match original response_length for alignment
-            if new_response_ids.shape[0] >= response_length:
-                if is_debug and i == 0:
-                    print(f"  -> TRUNCATING new_response_ids from {new_response_ids.shape[0]} to {response_length}")
-                # truncate to original response_length
-                new_response_ids = new_response_ids[:response_length]
-            else:
-                pad_size = response_length - new_response_ids.shape[0]
-                if is_debug and i == 0:
-                    print(f"  -> PADDING new_response_ids from {new_response_ids.shape[0]} by {pad_size} to {response_length}")
-                # right-pad with pad_token_id
-                new_response_ids = torch.cat([
-                    new_response_ids,
-                    torch.full((pad_size,), target_tokenizer.pad_token_id, dtype=new_response_ids.dtype)
-                ])
-            rm_responses.append(new_response_ids.unsqueeze(0))
-
-        rm_input_ids = torch.cat(rm_input_ids, dim=0)
         rm_attention_mask = torch.cat(rm_attention_mask, dim=0)
-        rm_responses = torch.cat(rm_responses, dim=0)
-
-        rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
-
-        if is_debug:
-            print(f"\n[DEBUG _switch_chat_template_token_level] FINAL SHAPES:")
-            print(f"  rm_input_ids: {rm_input_ids.shape}")
-            print(f"  rm_attention_mask: {rm_attention_mask.shape}")
-            print(f"  rm_position_ids: {rm_position_ids.shape}")
-            print(f"  rm_responses: {rm_responses.shape}")
-            # Verify response is at the end for first sample
-            resp_len = rm_responses.shape[-1]
-            last_tokens = rm_input_ids[0, -resp_len:].tolist()
-            resp_tokens = rm_responses[0].tolist()
-            # Check how many of the last resp_len tokens in input_ids match responses
-            match = sum(1 for a, b in zip(last_tokens, resp_tokens) if a == b)
-            print(f"  response_length={resp_len}")
-            print(f"  last {resp_len} input_ids tokens vs rm_responses match: {match}/{resp_len}")
-            print(f"  last 10 of input_ids[0]: {rm_input_ids[0, -10:].tolist()}")
-            print(f"  last 10 of rm_responses[0]: {rm_responses[0, -10:].tolist()}")
-            print(f"{'='*80}\n")
-
         rm_inputs = {
-            "input_ids": rm_input_ids,
+            "input_ids": torch.cat(rm_input_ids, dim=0),
             "attention_mask": rm_attention_mask,
-            "position_ids": rm_position_ids,
-            "responses": rm_responses,
+            "position_ids": compute_position_id_with_mask(rm_attention_mask),
+            # Used only for response slicing and terminal-EOS handling. The model
+            # input above already ends in these exact valid response IDs.
+            "responses": data.batch["responses"],
         }
-
         return DataProto.from_dict(rm_inputs)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
@@ -2610,12 +2542,16 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if self.rank == 0:
                 print(f"Chat template switching is ENABLED (token-level aligned, left-padded).")
             rm_data = self._switch_chat_template_token_level(data)
+            # Token-level template conversion changes prompt tokens but preserves
+            # response positions, so retain this for terminal EOS bridging.
+            rm_data.batch["response_mask"] = response_mask
         else:
             rm_inputs = {
                 "input_ids": data.batch["input_ids"],
                 "attention_mask": data.batch["attention_mask"],
                 "position_ids": data.batch["position_ids"],
                 "responses": data.batch["responses"],
+                "response_mask": response_mask,
             }
             rm_data = DataProto.from_dict(rm_inputs)
 
@@ -2638,6 +2574,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             top_k = data.meta_info.get("log_prob_top_k", self.config.get("log_prob_top_k", 0))
             top_k_strategy = data.meta_info.get("top_k_strategy", self.config.get("top_k_strategy", "only_stu"))
             teacher_temperature = data.meta_info.get("teacher_temperature", self.config.get("teacher_temperature", 1.0))
+            canonical_eos_token_id = data.meta_info.get("canonical_eos_token_id", None)
+            teacher_source_eos_token_id = data.meta_info.get("teacher_source_eos_token_id", None)
             
             output_logp = []
             output_on_student_logp = []
@@ -2669,7 +2607,9 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     compute_entropy=compute_entropy,
                     top_k=top_k,
                     strategy=top_k_strategy,
-                    teacher_temperature=teacher_temperature
+                    teacher_temperature=teacher_temperature,
+                    canonical_eos_token_id=canonical_eos_token_id,
+                    teacher_source_eos_token_id=teacher_source_eos_token_id,
                 )
                 output_logp.append(teacher_logp_batch)
                 if teacher_on_student_logp_batch is not None:

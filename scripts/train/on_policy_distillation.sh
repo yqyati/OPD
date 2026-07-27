@@ -12,6 +12,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
+source .env
+
 set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -47,12 +49,12 @@ export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=0
 # export CUDA_VISIBLE_DEVICES=1,2,3,4
 export PYTHONUNBUFFERED=1
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 export PROJECT_NAME='OnPolicyDistillation' # TODO
 export TORCH_NCCL_BLOCKING_WAIT=1
 export NCCL_TIMEOUT=7200
 export TORCH_DISTRIBUTED_DEBUG=INFO
-export FLASHINFER_WORKSPACE_BASE=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/.flashinfer-workspace
+export FLASHINFER_WORKSPACE_BASE=${YANGQINGYU_ROOT}/.flashinfer-workspace
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export ADV_ESTIMATOR=${ADV_ESTIMATOR:-token_reward_direct}
 # export ADV_ESTIMATOR=token_reward_direct_plus_grpo
@@ -125,7 +127,7 @@ TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B-RL
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B
 # export ACTOR_MODEL_PATH=model/Qwen2.5-Math-1.5B
-export ACTOR_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-SFT
+export ACTOR_MODEL_PATH=${MODEL_ROOT}/Qwen3-1.7B-SFT
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B-step_0400
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-SFT
@@ -146,7 +148,7 @@ export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
 # export REWARD_MODEL_PATH=model/Skywork-OR1-Math-7B
 # export REWARD_MODEL_PATH=model/Polaris-4B-Preview
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-14B
-export REWARD_MODEL_PATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base-GRPO
+export REWARD_MODEL_PATH=${MODEL_ROOT}/Qwen3-4B-Base-GRPO
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
 export PROJECT_PATH=checkpoint

@@ -12,10 +12,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
 export EVAL_GPUS=${EVAL_GPUS:-0,1,2,3}

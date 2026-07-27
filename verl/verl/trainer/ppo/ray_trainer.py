@@ -1444,12 +1444,18 @@ class RayPPOTrainer:
                             batch.meta_info["global_steps"] = self.global_steps
                             batch.meta_info["is_plot"] = self.config.trainer.get("is_plot", False)
                             teacher_temperature = self.config.actor_rollout_ref.rollout.get("teacher_temperature", 1.0)
+                            canonical_eos_token_id = self.config.actor_rollout_ref.rollout.get("canonical_eos_token_id", None)
+                            teacher_source_eos_token_id = self.config.actor_rollout_ref.rollout.get(
+                                "teacher_source_eos_token_id", None
+                            )
 
                             batch.meta_info["log_prob_top_k"] = top_k
                             batch.meta_info["top_k_strategy"] = strategy
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
+                            batch.meta_info["canonical_eos_token_id"] = canonical_eos_token_id
+                            batch.meta_info["teacher_source_eos_token_id"] = teacher_source_eos_token_id
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)

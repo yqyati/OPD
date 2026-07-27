@@ -2,7 +2,11 @@ from utils import grade_answer_verl
 from transformers import AutoTokenizer
 import json
 import pandas as pd
+import os
 from pathlib import Path
+
+
+YANGQINGYU_ROOT = Path(os.environ["YANGQINGYU_ROOT"])
 import re
 import argparse # Added
 # vllm import moved to conditional execution to save resources if disabled
@@ -33,8 +37,8 @@ Here is your task. Simply reply with either CORRECT, INCORRECT, or INVALID. Don'
 Judging the correctness of the candidate's answer:
 """
 
-DEFAULT_VERIFIER_MODEL = "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/CompassVerifier-3B"
-DEFAULT_LENGTH_TOKENIZER = "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-SFT"
+DEFAULT_VERIFIER_MODEL = str(YANGQINGYU_ROOT) + "/model/CompassVerifier-3B"
+DEFAULT_LENGTH_TOKENIZER = str(YANGQINGYU_ROOT) + "/model/Qwen3-1.7B-SFT"
 
 # Global variables to be initialized in main.
 vllm_model = None

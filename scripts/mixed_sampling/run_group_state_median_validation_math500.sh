@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # External validation of the Group-OPD state ranking metric on MATH-500.
 # MATH-500 is never used by the DAPO-Math-17k training runs.
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

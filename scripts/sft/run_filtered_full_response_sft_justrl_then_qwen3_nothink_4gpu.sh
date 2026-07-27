@@ -12,12 +12,14 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
 export EVAL_GPUS=${EVAL_GPUS:-0,1,2,3}
 export LR=${LR:-1e-5}
@@ -80,7 +82,7 @@ run_filtered_full_sft_stage() {
 
 run_filtered_full_sft_stage \
     "justrl_filtered_full_response_sft" \
-    "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/DeepSeek-R1-Distill-Qwen-1.5B" \
+    "${MODEL_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B" \
     "datasets/sft_teacher_response/justrl_full_response_7168.parquet" \
     "datasets/sft_teacher_response/justrl_full_response_7168_correct.parquet" \
     "datasets/sft/justrl_full_response_sft_7168_correct.parquet" \
@@ -89,7 +91,7 @@ run_filtered_full_sft_stage \
 
 run_filtered_full_sft_stage \
     "qwen3_nothink_filtered_full_response_sft" \
-    "/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-Base" \
+    "${MODEL_ROOT}/Qwen3-1.7B-Base" \
     "datasets/sft_teacher_response/qwen3_base_nothink_full_response_7168.parquet" \
     "datasets/sft_teacher_response/qwen3_base_nothink_full_response_7168_correct.parquet" \
     "datasets/sft/qwen3_nothink_full_response_sft_7168_correct.parquet" \

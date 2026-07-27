@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # Forward-only metric benchmark. It uses stored V_student labels only after
 # scoring, and never launches new continuation rollouts.
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 STATE_DIR="${ROOT}/OPD/outputs/group_state_value/q3b_group_prefix128_n4_k4_p1000_seed42_2026-07-17_14-21-45"

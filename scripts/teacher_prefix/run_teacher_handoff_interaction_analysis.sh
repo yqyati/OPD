@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # Runs the same forward-only analysis on both clean handoff-value studies.
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 INPUT="${ROOT}/OPD/datasets/teacher_prefix/qwen3_4b_base_thinking_dapo_math_17k_teacher_prefix1024_tokenids_topk16.parquet"
 STUDENT="${ROOT}/model/Qwen3-1.7B-Base"

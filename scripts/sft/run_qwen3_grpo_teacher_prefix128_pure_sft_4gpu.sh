@@ -12,12 +12,14 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export CUDA_LAUNCH_BLOCKING=0
 export PYTHONUNBUFFERED=1
@@ -48,16 +50,20 @@ export DATA_SEED=${DATA_SEED:-42}
 export ENABLE_THINKING=${ENABLE_THINKING:-False}
 export USE_GENERATED_TOKEN_IDS=${USE_GENERATED_TOKEN_IDS:-False}
 export GENERATED_TOKEN_IDS_COLUMN=${GENERATED_TOKEN_IDS_COLUMN:-teacher_prefix_token_ids}
+export GENERATED_FINISH_REASON_COLUMN=${GENERATED_FINISH_REASON_COLUMN:-teacher_prefix_finish_reason}
+export STUDENT_CHAT_TEMPLATE_FILE=${STUDENT_CHAT_TEMPLATE_FILE:-}
+export SOURCE_EOS_TOKEN_ID=${SOURCE_EOS_TOKEN_ID:-}
+export CANONICAL_EOS_TOKEN_ID=${CANONICAL_EOS_TOKEN_ID:-}
 export EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-15000}
-export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-1.7B-Base}
+export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-${MODEL_ROOT}/Qwen3-1.7B-Base}
 export SOURCE_PREFIX_DATA=${SOURCE_PREFIX_DATA:-datasets/teacher_prefix/qwen3_grpo_dapo_math_17k_teacher_prefix128.parquet}
 export SFT_DATASET=${SFT_DATASET:-datasets/sft/qwen3_grpo_teacher_prefix128_pure_sft.parquet}
 export RESPONSE_COLUMN=${RESPONSE_COLUMN:-teacher_prefix_text}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_grpo_teacher_prefix128_pure_sft_lr${LR}}
 export CKPT_PATH=${CKPT_PATH:-checkpoint/${EXPERIMENT_NAME}_$(date +%Y-%m-%d_%H-%M-%S)}
 export MODEL_NAME=${MODEL_NAME:-qwen3_grpo_teacher_prefix128_pure_sft_lr${LR}}
-export OUTPUT_DIR=${OUTPUT_DIR:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/outputs/eval/justrl_eval_outputs_15000}
-export DATA_DIR=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/val/data
+export OUTPUT_DIR=${OUTPUT_DIR:-${OPD_ROOT}/outputs/eval/justrl_eval_outputs_15000}
+export DATA_DIR=${OPD_ROOT}/scripts/val/data
 
 case "${ENABLE_THINKING,,}" in
     true) THINKING_ARG=(--enable-thinking); EVAL_THINKING_ARG=--enable-thinking ;;
@@ -77,6 +83,31 @@ case "${USE_GENERATED_TOKEN_IDS,,}" in
     *) echo "USE_GENERATED_TOKEN_IDS must be True or False" >&2; exit 1 ;;
 esac
 
+SFT_TEMPLATE_ARGS=()
+EVAL_TEMPLATE_ARGS=()
+if [ -n "${STUDENT_CHAT_TEMPLATE_FILE}" ]; then
+    if [ ! -f "${STUDENT_CHAT_TEMPLATE_FILE}" ]; then
+        echo "Missing student chat template: ${STUDENT_CHAT_TEMPLATE_FILE}" >&2
+        exit 1
+    fi
+    SFT_TEMPLATE_ARGS+=(--chat-template-file "${STUDENT_CHAT_TEMPLATE_FILE}")
+    EVAL_TEMPLATE_ARGS+=(--prompt-template-file "${STUDENT_CHAT_TEMPLATE_FILE}")
+fi
+
+SFT_EOS_ARGS=()
+EVAL_EOS_ARGS=()
+if [ -n "${SOURCE_EOS_TOKEN_ID}" ] || [ -n "${CANONICAL_EOS_TOKEN_ID}" ]; then
+    if [ -z "${SOURCE_EOS_TOKEN_ID}" ] || [ -z "${CANONICAL_EOS_TOKEN_ID}" ]; then
+        echo "SOURCE_EOS_TOKEN_ID and CANONICAL_EOS_TOKEN_ID must be set together." >&2
+        exit 1
+    fi
+    SFT_EOS_ARGS+=(
+        --source-eos-token-id "${SOURCE_EOS_TOKEN_ID}"
+        --canonical-eos-token-id "${CANONICAL_EOS_TOKEN_ID}"
+    )
+    EVAL_EOS_ARGS+=(--stop-token-ids "${CANONICAL_EOS_TOKEN_ID}")
+fi
+
 if [ ! -f "$SOURCE_PREFIX_DATA" ]; then
     echo "Missing source teacher-prefix data: $SOURCE_PREFIX_DATA" >&2
     exit 1
@@ -88,9 +119,12 @@ python scripts/sft/make_teacher_prefix_sft_data.py \
     --tokenizer "$ACTOR_MODEL_PATH" \
     --response-column "$RESPONSE_COLUMN" \
     --generated-token-ids-column "$GENERATED_TOKEN_IDS_COLUMN" \
+    --finish-reason-column "$GENERATED_FINISH_REASON_COLUMN" \
     --max-length "$MAX_LENGTH" \
     "${THINKING_ARG[@]}" \
-    "${TOKEN_ID_ARG[@]}"
+    "${TOKEN_ID_ARG[@]}" \
+    "${SFT_TEMPLATE_ARGS[@]}" \
+    "${SFT_EOS_ARGS[@]}"
 
 EXPECTED_STEPS=$(/root/miniconda3/envs/verl/bin/python -c "import pandas as pd; n=len(pd.read_parquet('${SFT_DATASET}')); bs=${TRAIN_BATCH_SIZE}; ep=${TOTAL_EPOCHS}; print(max(1, (n // bs) * ep))")
 echo "EXPECTED_STEPS: ${EXPECTED_STEPS}"
@@ -146,7 +180,7 @@ if [ -z "$STEP" ]; then
 fi
 
 HF_DIR="${CKPT_PATH}/global_step_${STEP}/huggingface"
-MODEL_DIR="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/merged_models/${MODEL_NAME}_step${STEP}"
+MODEL_DIR="${OPD_ROOT}/merged_models/${MODEL_NAME}_step${STEP}"
 EVAL_DIR="${OUTPUT_DIR}/$(basename "$MODEL_DIR")"
 
 if [ ! -f "${HF_DIR}/config.json" ]; then
@@ -169,6 +203,8 @@ python scripts/val/eval/gen_vllm.py \
     --temperature 0.7 \
     --top-p 0.95 \
     --gpus "$EVAL_GPUS" \
+    "${EVAL_TEMPLATE_ARGS[@]}" \
+    "${EVAL_EOS_ARGS[@]}" \
     "$EVAL_THINKING_ARG"
 
 python scripts/val/eval/grade.py \

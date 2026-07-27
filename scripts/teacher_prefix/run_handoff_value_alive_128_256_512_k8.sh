@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # Completion-aware teacher-prefix handoff comparison. All selected teacher
 # trajectories remain live through token 512, so 128/256/512 are matched
 # suffix handoff states rather than EOS-contaminated continuations.
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

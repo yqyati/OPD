@@ -1,15 +1,17 @@
 #!/bin/bash
+source .env
+
 set -euo pipefail
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 python scripts/teacher_prefix/generate_teacher_prefix_data.py \
     --input datasets/dapo-math-17k-teacher-aligned.parquet \
     --output datasets/teacher_prefix/qwen3_grpo_dapo_math_17k_teacher_prefix128.parquet \
-    --teacher-model /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/Qwen3-4B-Base-GRPO \
+    --teacher-model ${MODEL_ROOT}/Qwen3-4B-Base-GRPO \
     --gpus 0,1,2,3,4,5,6,7 \
     --tensor-parallel-size 8 \
     --max-model-len 2048 \

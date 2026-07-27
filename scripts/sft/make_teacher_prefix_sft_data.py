@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pure-SFT data from teacher-response OPD parquet.
+"""Build pure-SFT data from generated teacher-response parquet.
 
 Each row becomes a single-turn conversation:
   user: original prompt
@@ -25,8 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--response-column", default="teacher_prefix_text")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--chat-template-file", default=None)
     parser.add_argument("--use-generated-token-ids", action="store_true")
     parser.add_argument("--generated-token-ids-column", default="teacher_prefix_token_ids")
+    parser.add_argument("--finish-reason-column", default="teacher_prefix_finish_reason")
+    parser.add_argument("--source-eos-token-id", type=int, default=None)
+    parser.add_argument("--canonical-eos-token-id", type=int, default=None)
     return parser.parse_args()
 
 
@@ -40,7 +44,12 @@ def normalize_prompt(prompt) -> list[dict]:
 
 def main() -> None:
     args = parse_args()
+    if (args.source_eos_token_id is None) != (args.canonical_eos_token_id is None):
+        raise ValueError("--source-eos-token-id and --canonical-eos-token-id must be set together")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+    chat_template = None
+    if args.chat_template_file is not None:
+        chat_template = Path(args.chat_template_file).read_text(encoding="utf-8")
     df = pd.read_parquet(args.input)
 
     rows = []
@@ -56,6 +65,13 @@ def main() -> None:
                     f"{args.generated_token_ids_column} is required with --use-generated-token-ids"
                 )
             generated_ids = [int(token_id) for token_id in generated_ids]
+            if row.get(args.finish_reason_column) == "stop" and args.source_eos_token_id is not None:
+                if not generated_ids or generated_ids[-1] != args.source_eos_token_id:
+                    raise RuntimeError(
+                        f"Stopped response must end with source EOS {args.source_eos_token_id}; "
+                        f"got {generated_ids[-1] if generated_ids else None}."
+                    )
+                generated_ids[-1] = args.canonical_eos_token_id
         if args.use_generated_token_ids and not generated_ids:
             skipped_empty += 1
             continue
@@ -70,6 +86,7 @@ def main() -> None:
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=args.enable_thinking,
+                chat_template=chat_template,
             )
             base_ids = tokenizer.encode(base_prompt, add_special_tokens=False)
             token_ids = base_ids + generated_ids
@@ -82,6 +99,7 @@ def main() -> None:
                 tokenize=True,
                 add_generation_prompt=False,
                 enable_thinking=args.enable_thinking,
+                chat_template=chat_template,
             )
             loss_mask = None
         length = len(token_ids)

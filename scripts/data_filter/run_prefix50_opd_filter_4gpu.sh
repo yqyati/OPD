@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/data_filter:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${OPD_ROOT}/scripts/data_filter:${PYTHONPATH:-}
 export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
 export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
 export VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD:-spawn}
 
-INPUT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/dapo-math-17k-teacher-aligned.parquet
-PROMPT_SCORES=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/opd_prompt_filter/opd_prompt_scores.parquet
-OUTPUT_DIR=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/opd_prefix50_filter
+INPUT=${OPD_ROOT}/datasets/dapo-math-17k-teacher-aligned.parquet
+PROMPT_SCORES=${OPD_ROOT}/datasets/opd_prompt_filter/opd_prompt_scores.parquet
+OUTPUT_DIR=${OPD_ROOT}/datasets/opd_prefix50_filter
 PREFIX_ROLLOUTS=${OUTPUT_DIR}/student_prefix50_rollouts.parquet
-STUDENT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/DeepSeek-R1-Distill-Qwen-1.5B
-TEACHER=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/JustRL-DeepSeek-1.5B
+STUDENT=${MODEL_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B
+TEACHER=${MODEL_ROOT}/JustRL-DeepSeek-1.5B
 BATCH_SIZE=${BATCH_SIZE:-8}
 PYTHON=${PYTHON:-/root/miniconda3/envs/verl/bin/python}
 GEN_GPUS=${GEN_GPUS:-0}

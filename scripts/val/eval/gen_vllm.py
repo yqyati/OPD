@@ -83,17 +83,29 @@ def split_rollout_ids(rollout_ids: list[int], num_workers: int):
 def worker_process(args_tuple):
     """
     Each worker runs on a single GPU:
-    args_tuple = (model_name, samples, rollout_id_list, gpu_id, enable_thinking, temperature, top_p, max_tokens)
+    args_tuple = (model_name, samples, rollout_id_list, gpu_id, enable_thinking,
+                  temperature, top_p, max_tokens, chat_template, stop_token_ids)
     gpu_id: values such as "0" or "3", used for CUDA_VISIBLE_DEVICES
     """
-    model_name, samples, rollout_id_list, gpu_id, enable_thinking, temperature, top_p, max_tokens = args_tuple
+    (
+        model_name,
+        samples,
+        rollout_id_list,
+        gpu_id,
+        enable_thinking,
+        temperature,
+        top_p,
+        max_tokens,
+        chat_template,
+        stop_token_ids,
+    ) = args_tuple
     
     # CUDA_VISIBLE_DEVICES must be set inside the spawned process.
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
     
     results = []
     llm = None
-    stop_token_ids = []
+    resolved_stop_token_ids = list(stop_token_ids)
     
     try:
         print(
@@ -114,15 +126,12 @@ def worker_process(args_tuple):
         try:
             tokenizer = llm.get_tokenizer()
             
-            # Encode stop tokens.
-            for stop_token in ["<|im_end|>", "<|endoftext|>"]:
-                try:
-                    if hasattr(tokenizer, "encode"):
-                        encoded = tokenizer.encode(stop_token, add_special_tokens=False)
-                        if encoded:
-                            stop_token_ids.append(encoded[0])
-                except Exception:
-                    pass
+            if not resolved_stop_token_ids:
+                native_eos = tokenizer.eos_token_id
+                if isinstance(native_eos, (list, tuple)):
+                    resolved_stop_token_ids.extend(int(token_id) for token_id in native_eos)
+                elif native_eos is not None:
+                    resolved_stop_token_ids.append(int(native_eos))
         except Exception as e:
             tokenizer = None
             print(f"[GPU {gpu_id}] Warning: Could not get tokenizer for stop tokens: {e}", flush=True)
@@ -132,7 +141,7 @@ def worker_process(args_tuple):
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
-                stop_token_ids=stop_token_ids if stop_token_ids else None,
+                stop_token_ids=resolved_stop_token_ids if resolved_stop_token_ids else None,
             )
 
             if tokenizer is None:
@@ -145,7 +154,7 @@ def worker_process(args_tuple):
                     [{"role": "user", "content": s["prompt"]}],
                     tokenize=False,
                     add_generation_prompt=True,
-                    enable_thinking=enable_thinking,
+                    **({"chat_template": chat_template} if chat_template is not None else {"enable_thinking": enable_thinking}),
                 )
                 for s in samples
             ]
@@ -230,6 +239,16 @@ def main():
         help="Comma-separated GPU ids. One vLLM process is launched per id.",
     )
     parser.add_argument(
+        "--prompt-template-file",
+        default=None,
+        help="Optional Jinja prompt template file. When set, it replaces the model tokenizer's chat template.",
+    )
+    parser.add_argument(
+        "--stop-token-ids",
+        default="",
+        help="Optional comma-separated token IDs used by vLLM for generation stopping. Defaults to the model native EOS.",
+    )
+    parser.add_argument(
         "--replace",
         action="store_true",
         help="Regenerate output files even if they already exist.",
@@ -250,6 +269,17 @@ def main():
     parser.set_defaults(enable_thinking=False)
     args = parser.parse_args()
 
+    chat_template = None
+    if args.prompt_template_file is not None:
+        template_path = Path(args.prompt_template_file).expanduser()
+        if not template_path.is_file():
+            raise FileNotFoundError(f"Prompt template file does not exist: {template_path}")
+        chat_template = template_path.read_text(encoding="utf-8")
+    try:
+        stop_token_ids = [int(token_id) for token_id in args.stop_token_ids.split(",") if token_id.strip()]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --stop-token-ids={args.stop_token_ids!r}; expected comma-separated integers.") from exc
+
     # Specify GPU IDs, with one model instance assigned to each GPU.
     gpu_workers = [gpu.strip() for gpu in args.gpus.split(",") if gpu.strip()]
     if not gpu_workers:
@@ -264,7 +294,8 @@ def main():
     ]
 
     print(f"GPU workers (one model per GPU): {gpu_workers}")
-    print(f"apply_chat_template enable_thinking={args.enable_thinking}")
+    print(f"prompt template: {args.prompt_template_file or 'model default'}")
+    print(f"stop token ids: {stop_token_ids or 'model native EOS'}")
 
     for model_name in args.model:
         print(f"\n{'='*50}\nStarting evaluation for model: {model_name}\n{'='*50}")
@@ -315,6 +346,8 @@ def main():
                     args.temperature,
                     args.top_p,
                     args.max_tokens,
+                    chat_template,
+                    stop_token_ids,
                 )
                 for i in range(num_workers)
             ]

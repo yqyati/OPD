@@ -1,0 +1,10 @@
+{% for message in messages %}{% if message['role'] == 'system' %}{{ message['content'] }}
+
+{% elif message['role'] == 'user' %}Problem:
+{{ message['content'] }}
+
+{% elif message['role'] == 'assistant' %}Solution:
+{{ message['content'] }}
+
+{% endif %}{% endfor %}{% if add_generation_prompt %}Solution:
+{% endif %}

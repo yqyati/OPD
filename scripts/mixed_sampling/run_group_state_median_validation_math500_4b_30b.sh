@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # External Group-OPD state-ranking validation: Qwen3-4B student -> Qwen3-30B-A3B teacher.
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # Offline only: measure teacher-to-student transfer efficiency at prefix handoffs.
 # Reuses an existing student handoff diagnosis and never calls the training entrypoint.
 
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

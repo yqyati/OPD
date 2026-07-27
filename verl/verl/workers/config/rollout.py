@@ -159,6 +159,11 @@ class RolloutConfig(BaseConfig):
     top_k_strategy: str = "only_stu"  # "only_stu", "only_tch", "intersection", or "union"
     reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", or "none"
     teacher_temperature: float = 1.0  # Temperature for teacher logits (default 1.0, no scaling)
+    # Optional vocabulary bridge for cross-template distillation. On every valid
+    # response position, teacher probability mass on source EOS is merged into
+    # canonical EOS before extracting teacher top-k targets.
+    canonical_eos_token_id: Optional[int] = None
+    teacher_source_eos_token_id: Optional[int] = None
     online_prefix_selection: OnlinePrefixSelectionConfig = field(default_factory=OnlinePrefixSelectionConfig)
 
     disable_log_stats: bool = True

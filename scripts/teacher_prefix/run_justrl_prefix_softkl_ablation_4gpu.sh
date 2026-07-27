@@ -1,10 +1,12 @@
 #!/bin/bash
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
 export EVAL_GPUS=${EVAL_GPUS:-0,1,2,3}
 export LR=${LR:-1e-5}
@@ -15,8 +17,8 @@ export LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16}
 
 SOURCE_PREFIX_DATA=${SOURCE_PREFIX_DATA:-datasets/teacher_prefix/opd_prompt_all_teacher_prefix128.parquet}
 SOFTKL_PREFIX_DATA=${SOFTKL_PREFIX_DATA:-datasets/teacher_prefix/opd_prompt_all_teacher_prefix128_topk${LOG_PROB_TOP_K}.parquet}
-STUDENT_MODEL=${STUDENT_MODEL:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/DeepSeek-R1-Distill-Qwen-1.5B}
-TEACHER_MODEL=${TEACHER_MODEL:-/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/JustRL-DeepSeek-1.5B}
+STUDENT_MODEL=${STUDENT_MODEL:-${MODEL_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B}
+TEACHER_MODEL=${TEACHER_MODEL:-${MODEL_ROOT}/JustRL-DeepSeek-1.5B}
 
 if [ ! -f "$SOURCE_PREFIX_DATA" ]; then
     echo "Missing source teacher-prefix data: $SOURCE_PREFIX_DATA" >&2

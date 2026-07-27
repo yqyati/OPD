@@ -16,12 +16,50 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import hashlib
 import json
 import os
 from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any
+
+
+# Most Linux filesystems limit a single path component to 255 bytes. Experiment
+# names often encode all hyperparameters and can exceed that limit even though
+# the complete path is otherwise valid. Keep a stable digest so the shortened
+# name is still unique and can be traced back to its full name in trainer logs.
+_MAX_TRACKING_PATH_COMPONENT_BYTES = 200
+
+
+def _safe_path_component(value: str, *, max_bytes: int = _MAX_TRACKING_PATH_COMPONENT_BYTES) -> str:
+    """Return ``value`` unchanged when safe, otherwise shorten it with a hash.
+
+    The limit is measured in UTF-8 bytes rather than Python characters, which
+    matters for non-ASCII project and experiment names. ``max_bytes`` reserves
+    margin below the common 255-byte filesystem component limit for suffixes
+    such as the file logger's ``.jsonl`` extension.
+    """
+    if max_bytes <= 16:
+        raise ValueError("max_bytes must leave room for a digest suffix")
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+
+    suffix = f"--{hashlib.sha256(encoded).hexdigest()[:12]}"
+    prefix_bytes = encoded[: max_bytes - len(suffix.encode("ascii"))]
+    # Do not leave a partial multi-byte UTF-8 character at the boundary.
+    prefix = prefix_bytes.decode("utf-8", errors="ignore").rstrip("-_. ")
+    return f"{prefix}{suffix}"
+
+
+def _default_tensorboard_dir(project_name: str, experiment_name: str) -> str:
+    """Build the default TensorBoard path with filesystem-safe components."""
+    return os.path.join(
+        "tensorboard_log",
+        _safe_path_component(str(project_name)),
+        _safe_path_component(str(experiment_name)),
+    )
 
 
 class Tracking:
@@ -232,9 +270,16 @@ class FileLogger:
         self.filepath = os.getenv("VERL_FILE_LOGGER_PATH", None)
         if self.filepath is None:
             root_path = os.path.expanduser(os.getenv("VERL_FILE_LOGGER_ROOT", "."))
-            directory = os.path.join(root_path, self.project_name)
+            safe_project_name = _safe_path_component(self.project_name)
+            directory = os.path.join(root_path, safe_project_name)
             os.makedirs(directory, exist_ok=True)
-            self.filepath = os.path.join(directory, f"{self.experiment_name}.jsonl")
+            safe_experiment_name = _safe_path_component(self.experiment_name)
+            if safe_experiment_name != self.experiment_name:
+                print(
+                    "File logger shortened an overlong experiment filename: "
+                    f"{self.experiment_name!r} -> {safe_experiment_name!r}"
+                )
+            self.filepath = os.path.join(directory, f"{safe_experiment_name}.jsonl")
             print(f"Creating file logger at {self.filepath}")
         self.fp = open(self.filepath, "w")
 
@@ -252,7 +297,13 @@ class _TensorboardAdapter:
 
         from torch.utils.tensorboard import SummaryWriter
 
-        tensorboard_dir = os.environ.get("TENSORBOARD_DIR", f"tensorboard_log/{project_name}/{experiment_name}")
+        default_dir = _default_tensorboard_dir(project_name, experiment_name)
+        tensorboard_dir = os.environ.get("TENSORBOARD_DIR", default_dir)
+        if tensorboard_dir == default_dir and str(experiment_name) != _safe_path_component(str(experiment_name)):
+            print(
+                "TensorBoard shortened an overlong experiment directory name: "
+                f"{experiment_name!r} -> {_safe_path_component(str(experiment_name))!r}"
+            )
         os.makedirs(tensorboard_dir, exist_ok=True)
         print(f"Saving tensorboard log to {tensorboard_dir}.")
         self.writer = SummaryWriter(tensorboard_dir)
@@ -464,7 +515,7 @@ class ValidationGenerationsLogger:
 
             # Use the same directory structure as _TensorboardAdapter
             if self.project_name and self.experiment_name:
-                default_dir = os.path.join("tensorboard_log", self.project_name, self.experiment_name)
+                default_dir = _default_tensorboard_dir(self.project_name, self.experiment_name)
             else:
                 default_dir = "tensorboard_log"
 

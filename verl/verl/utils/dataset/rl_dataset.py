@@ -30,6 +30,10 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 import verl.utils.torch_functional as verl_F
+from verl.utils.eos_canonicalization import (
+    canonicalize_completed_prefix_terminal_eos,
+    validate_eos_bridge,
+)
 from verl.utils.model import compute_position_id_with_mask
 
 logger = logging.getLogger(__name__)
@@ -201,11 +205,24 @@ class RLHFDataset(Dataset):
         self.image_patch_size = config.get("image_patch_size", 14)
         self.max_prompt_length = config.get("max_prompt_length", 1024)
         self.teacher_prefix_max_len = int(config.get("teacher_prefix_max_len", 0) or 0)
+        self.teacher_prefix_eos_bridge = validate_eos_bridge(
+            config.get("teacher_prefix_canonical_eos_token_id", None),
+            config.get("teacher_prefix_source_eos_token_id", None),
+        )
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
-        self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+        self.apply_chat_template_kwargs = dict(config.get("apply_chat_template_kwargs", {}))
+        chat_template_file = self.apply_chat_template_kwargs.pop("chat_template_file", None)
+        if chat_template_file is not None:
+            if self.apply_chat_template_kwargs.get("chat_template") is not None:
+                raise ValueError("Specify only one of chat_template and chat_template_file.")
+            chat_template_path = os.path.expanduser(str(chat_template_file))
+            if not os.path.isfile(chat_template_path):
+                raise FileNotFoundError(f"Chat template file does not exist: {chat_template_path}")
+            with open(chat_template_path, encoding="utf-8") as f:
+                self.apply_chat_template_kwargs["chat_template"] = f.read()
 
         self.tool_config_path = config.get("tool_config_path", None)
         self.tool_schemas = None
@@ -527,6 +544,13 @@ class RLHFDataset(Dataset):
                     and len(teacher_prefix_token_ids) <= self.teacher_prefix_max_len
                 )
                 teacher_prefix_token_ids = teacher_prefix_token_ids[: self.teacher_prefix_max_len]
+                if teacher_prefix_is_complete and self.teacher_prefix_eos_bridge is not None:
+                    canonical_eos_token_id, source_eos_token_id = self.teacher_prefix_eos_bridge
+                    teacher_prefix_token_ids = canonicalize_completed_prefix_terminal_eos(
+                        teacher_prefix_token_ids,
+                        canonical_eos_token_id=canonical_eos_token_id,
+                        source_eos_token_id=source_eos_token_id,
+                    )
             if teacher_prefix_token_ids is not None:
                 full_prompt_ids = base_prompt_ids + teacher_prefix_token_ids
                 input_ids = torch.tensor([full_prompt_ids], dtype=torch.long)

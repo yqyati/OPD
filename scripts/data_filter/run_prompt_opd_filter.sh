@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${PYTHONPATH:-}
 
 python scripts/data_filter/score_prompt_opd_data.py \
-  --input /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/dapo-math-17k-teacher-aligned.parquet \
-  --output-dir /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/opd_prompt_filter \
-  --student /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/DeepSeek-R1-Distill-Qwen-1.5B \
-  --teacher /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/JustRL-DeepSeek-1.5B \
+  --input ${OPD_ROOT}/datasets/dapo-math-17k-teacher-aligned.parquet \
+  --output-dir ${OPD_ROOT}/datasets/opd_prompt_filter \
+  --student ${MODEL_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B \
+  --teacher ${MODEL_ROOT}/JustRL-DeepSeek-1.5B \
   --student-device cuda:0 \
   --teacher-device cuda:1 \
   --batch-size 8 \

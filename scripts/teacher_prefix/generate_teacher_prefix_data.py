@@ -30,6 +30,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=4)
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument(
+        "--require-alive-at-prefix-len",
+        type=int,
+        default=0,
+        help=(
+            "Keep only traces still generating after this many tokens. "
+            "A retained trace must have at least this many tokens and finish "
+            "because max_new_tokens was reached, never because it emitted EOS."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -98,6 +108,13 @@ def extract_topk_logprobs(generated, top_k: int) -> tuple[list[list[int]], list[
 
 def main() -> None:
     args = parse_args()
+    if args.require_alive_at_prefix_len < 0:
+        raise ValueError("--require-alive-at-prefix-len must be non-negative")
+    if args.require_alive_at_prefix_len > args.max_new_tokens:
+        raise ValueError(
+            "--require-alive-at-prefix-len cannot exceed --max-new-tokens; "
+            "the generator must produce the complete requested prefix."
+        )
     output_path = Path(args.output)
     if output_path.exists() and not args.force:
         print(f"{output_path} already exists. Use --force to regenerate.")
@@ -189,6 +206,23 @@ def main() -> None:
     out_df = df.merge(prefix_df, on="__teacher_prefix_row_id", how="left")
     if out_df["teacher_prefix_text"].isna().any():
         raise RuntimeError("Merged output contains empty teacher_prefix_text rows.")
+
+    if args.require_alive_at_prefix_len:
+        required_len = args.require_alive_at_prefix_len
+        alive_mask = (
+            out_df["teacher_prefix_token_len"].ge(required_len)
+            & out_df["teacher_prefix_finish_reason"].eq("length")
+        )
+        removed = int((~alive_mask).sum())
+        out_df = out_df.loc[alive_mask].copy()
+        if out_df.empty:
+            raise RuntimeError(
+                f"No teacher traces remained alive through prefix length {required_len}."
+            )
+        print(
+            f"Kept {len(out_df)}/{len(alive_mask)} traces alive through "
+            f"token {required_len}; removed {removed} stopped traces."
+        )
     out_df = out_df.drop(columns=["__teacher_prefix_row_id"])
     out_df.to_parquet(output_path, index=False)
     print(f"Wrote {output_path} ({len(out_df)} rows)")

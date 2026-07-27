@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
-PROJECT_ROOT="/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD"
+PROJECT_ROOT="${OPD_ROOT}"
 cd "${PROJECT_ROOT}"
 
 export PYTHONPATH="${PROJECT_ROOT}/verl:${PYTHONPATH:-}"
@@ -17,6 +19,8 @@ TEMPERATURE=0.7
 TOP_P=0.95
 GPUS="0,1,2,3"
 DISABLE_THINKING=1
+PROMPT_TEMPLATE_FILE=""
+STOP_TOKEN_IDS=""
 
 usage() {
   cat <<'EOF'
@@ -34,6 +38,9 @@ Options:
   --temperature FLOAT    Sampling temperature. Default: 0.7.
   --top-p FLOAT          Top-p sampling value. Default: 0.95.
   --gpus LIST            Comma-separated GPU ids. Default: 0,1,2,3.
+  --prompt-template-file PATH
+                         Explicit Jinja prompt template file for generation.
+  --stop-token-ids LIST  Comma-separated vLLM stop token IDs.
   --enable-thinking      Do not pass --disable-thinking to gen_vllm.py.
   -h, --help             Show this help message.
 EOF
@@ -77,6 +84,14 @@ while [[ $# -gt 0 ]]; do
       GPUS="$2"
       shift 2
       ;;
+    --prompt-template-file)
+      PROMPT_TEMPLATE_FILE="$2"
+      shift 2
+      ;;
+    --stop-token-ids)
+      STOP_TOKEN_IDS="$2"
+      shift 2
+      ;;
     --enable-thinking)
       DISABLE_THINKING=0
       shift
@@ -113,6 +128,17 @@ THINKING_ARGS=()
 if [[ "${DISABLE_THINKING}" -eq 1 ]]; then
   THINKING_ARGS+=(--disable-thinking)
 fi
+PROMPT_ARGS=()
+if [[ -n "${PROMPT_TEMPLATE_FILE}" ]]; then
+  if [[ ! -f "${PROMPT_TEMPLATE_FILE}" ]]; then
+    echo "Missing prompt template: ${PROMPT_TEMPLATE_FILE}" >&2
+    exit 1
+  fi
+  PROMPT_ARGS+=(--prompt-template-file "${PROMPT_TEMPLATE_FILE}")
+fi
+if [[ -n "${STOP_TOKEN_IDS}" ]]; then
+  PROMPT_ARGS+=(--stop-token-ids "${STOP_TOKEN_IDS}")
+fi
 
 python scripts/val/eval/gen_vllm.py \
   --model "${MODEL_DIR}" \
@@ -124,6 +150,7 @@ python scripts/val/eval/gen_vllm.py \
   --temperature "${TEMPERATURE}" \
   --top-p "${TOP_P}" \
   --gpus "${GPUS}" \
+  "${PROMPT_ARGS[@]}" \
   "${THINKING_ARGS[@]}"
 
 python scripts/val/eval/grade.py \

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # Offline analysis only. It does not modify training or rollout programs.
 
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

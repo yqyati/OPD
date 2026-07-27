@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 HANDOFF_DIR="${ROOT}/OPD/outputs/handoff_value/q3b_thinking_alive512_tp128_256_512_k8_p500_seed42_2026-07-17_15-47-26"
 OUTPUT_DIR="${ROOT}/OPD/outputs/suffix_teaching_opportunity/q3b_alive512_tp128_256_512_probe128_$(date +%Y-%m-%d_%H-%M-%S)"

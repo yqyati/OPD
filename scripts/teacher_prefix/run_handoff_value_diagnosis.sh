@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 
 # Offline only: diagnose real student continuation value for exact teacher-prefix handoffs.
 # This script does not call the training entrypoint and does not modify checkpoints.
 
-ROOT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu
+ROOT=${YANGQINGYU_ROOT}
 cd "${ROOT}/OPD"
 
 export PYTHONPATH="${ROOT}/OPD/verl:${PYTHONPATH:-}"

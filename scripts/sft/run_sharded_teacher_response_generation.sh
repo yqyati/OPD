@@ -9,7 +9,7 @@ set -euo pipefail
 RESPONSE_TP=${RESPONSE_TP:-1}
 RESPONSE_MAX_TOKENS=${RESPONSE_MAX_TOKENS:-7168}
 RESPONSE_MAX_MODEL_LEN=${RESPONSE_MAX_MODEL_LEN:-10240}
-RESPONSE_BATCH_SIZE=${RESPONSE_BATCH_SIZE:-256}
+RESPONSE_BATCH_SIZE=${RESPONSE_BATCH_SIZE:-128}
 RESPONSE_TEMPERATURE=${RESPONSE_TEMPERATURE:-0.7}
 RESPONSE_TOP_P=${RESPONSE_TOP_P:-0.95}
 RESPONSE_ENABLE_THINKING=${RESPONSE_ENABLE_THINKING:-True}
@@ -123,8 +123,12 @@ required = {"teacher_response_text", "teacher_response_token_ids", "teacher_resp
 missing = required.difference(out.columns)
 if missing:
     raise RuntimeError(f"missing required columns: {sorted(missing)}")
-if not out["teacher_response_enable_thinking"].all():
-    raise RuntimeError("generated dataset contains non-thinking teacher responses")
+expected_thinking = os.environ["RESPONSE_ENABLE_THINKING"].lower() == "true"
+if not (out["teacher_response_enable_thinking"] == expected_thinking).all():
+    raise RuntimeError(
+        "teacher-response thinking mode does not match RESPONSE_ENABLE_THINKING="
+        f"{expected_thinking}"
+    )
 if any(len(ids) == 0 for ids in out["teacher_response_token_ids"]):
     raise RuntimeError("generated dataset contains empty teacher response token IDs")
 print(f"validated teacher-response dataset: rows={len(out)} output={os.environ['RESPONSE_OUTPUT']}")

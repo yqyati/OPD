@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
+source .env
+
 set -euo pipefail
 set -x
 
-cd /mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD
+cd ${OPD_ROOT}
 
-export PYTHONPATH=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/verl:/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/scripts/data_filter:${PYTHONPATH:-}
+export PYTHONPATH=${OPD_ROOT}/verl:${OPD_ROOT}/scripts/data_filter:${PYTHONPATH:-}
 
-INPUT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/dapo-math-17k-teacher-aligned.parquet
-OUTPUT_DIR=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/OPD/datasets/opd_prompt_filter
-STUDENT=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/DeepSeek-R1-Distill-Qwen-1.5B
-TEACHER=/mnt/shared-storage-gpfs2/p1-shared-2/yangqingyu/model/JustRL-DeepSeek-1.5B
+INPUT=${OPD_ROOT}/datasets/dapo-math-17k-teacher-aligned.parquet
+OUTPUT_DIR=${OPD_ROOT}/datasets/opd_prompt_filter
+STUDENT=${MODEL_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B
+TEACHER=${MODEL_ROOT}/JustRL-DeepSeek-1.5B
 BATCH_SIZE=${BATCH_SIZE:-16}
 
 mkdir -p "${OUTPUT_DIR}"
