@@ -114,6 +114,8 @@ export CUDA_LAUNCH_BLOCKING=0
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # export CUDA_VISIBLE_DEVICES=1,2,3,4
 export PYTHONUNBUFFERED=1
+export VERL_STORAGE_WAIT_ENABLED=${VERL_STORAGE_WAIT_ENABLED:-1}
+export VERL_STORAGE_WAIT_INTERVAL_SECONDS=${VERL_STORAGE_WAIT_INTERVAL_SECONDS:-60}
 export PROJECT_NAME='OnPolicyDistillation' # TODO
 export TORCH_NCCL_BLOCKING_WAIT=1
 export NCCL_TIMEOUT=7200
@@ -340,6 +342,30 @@ echo "TRAIN_BATCH_SIZE: $TRAIN_BATCH_SIZE"
 echo "EXPECTED_STEPS: $EXPECTED_STEPS"
 echo "MIN_SUCCESS_STEP: $MIN_SUCCESS_STEP"
 
+# Hydra writes its config before Python enters main_ppo.py, so trainer-side
+# retry logic cannot protect that first write.  Wait for a real shared-storage
+# write here, then direct Hydra's tiny per-run metadata to rjob-local /tmp.
+# Checkpoints and merged models remain on the shared path and are protected by
+# the trainer's atomic retry logic below.
+wait_for_shared_storage() {
+    local probe_dir="${OPD_ROOT}"
+    local probe_path="${probe_dir}/.verl_storage_probe_${$}"
+    local wait_seconds="${VERL_STORAGE_WAIT_INTERVAL_SECONDS}"
+    local elapsed=0
+    while true; do
+        if printf '.' >"${probe_path}" 2>/dev/null; then
+            rm -f -- "${probe_path}"
+            echo "[storage-wait] shared storage is writable; launching training."
+            return
+        fi
+        rm -f -- "${probe_path}" 2>/dev/null || true
+        echo "[storage-wait] shared storage is not writable; waiting ${wait_seconds}s before launch (elapsed ${elapsed}s)." >&2
+        sleep "${wait_seconds}"
+        elapsed=$((elapsed + wait_seconds))
+    done
+}
+
+wait_for_shared_storage
 
 ray start --head
 sleep 5
@@ -347,6 +373,8 @@ sleep 5
 
 set +e
 python3 -m verl.trainer.main_ppo \
+    hydra.run.dir="/tmp/verl_hydra/${EXPERIMENT_NAME}" \
+    hydra.output_subdir=null \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
     data.shuffle=$DATA_SHUFFLE \
@@ -426,6 +454,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
     trainer.nnodes=1 \
     trainer.save_freq=100 \
+    trainer.storage_wait_enabled=True \
+    trainer.storage_wait_interval_seconds=${VERL_STORAGE_WAIT_INTERVAL_SECONDS} \
     trainer.test_freq=-1 \
     trainer.total_epochs=$TOTAL_EPOCHS \
     $TOTAL_TRAINING_STEPS_ARGS \

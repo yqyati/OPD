@@ -107,7 +107,7 @@ $PYTHON_BIN -m verl.trainer.main_ppo \
     trainer.validation_data_dir="validation_log/$EXPERIMENT_NAME" \
     trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
+    trainer.save_freq=${SAVE_FREQ:-100} \
     trainer.test_freq=-1 \
     trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.default_local_dir="$CKPT_PATH" \

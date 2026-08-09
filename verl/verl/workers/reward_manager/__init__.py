@@ -19,6 +19,7 @@ from .naive import NaiveRewardManager
 from .parallel_grpo_code import ParallelGRPOCodeRewardManager
 from .parallel_opd_code import ParallelOPDCodeRewardManager
 from .prime import PrimeRewardManager
+from .science_opd_metrics import ScienceOPDMetricsRewardManager
 
 # Note(haibin.lin): no need to include all reward managers here in case of complicated dependencies
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "ParallelGRPOCodeRewardManager",
     "ParallelOPDCodeRewardManager",
     "PrimeRewardManager",
+    "ScienceOPDMetricsRewardManager",
     "register",
     "get_reward_manager_cls",
 ]

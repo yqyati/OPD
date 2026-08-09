@@ -23,11 +23,9 @@ from score_prompt_opd_data import extract_prompt_text
 
 
 GUIDE_INSTRUCTION = (
-    "Give a weaker math solver one concrete strategy hint for the problem. "
-    "Return exactly one <HINT>...</HINT> block containing 1-3 concise sentences. "
-    "State the key method, representation, theorem, or intermediate setup that the solver should use. "
-    "Do not restate the problem. Do not show a derivation. Do not perform calculations. "
-    "Do not reveal the final answer. Do not add headings, preambles, or follow-up commentary."
+    "Help a smaller model solve the problem. Think through it internally, then write one concise and actionable "
+    "hint inside <HINT>...</HINT>. Point to the key idea and the first useful step, without giving the full "
+    "solution or final answer."
 )
 
 ANSWER_LEAK_PATTERN = re.compile(r"\\boxed\s*\{|(?:final\s+)?answer\s+is", re.IGNORECASE)
@@ -170,7 +168,7 @@ def main() -> None:
                 outputs = llm.generate(prompts, sampling)
                 for idx, output in zip(batch_indices, outputs, strict=True):
                     generated, guide_text, candidate_valid = select_hint_candidate(output.outputs)
-                    teacher_prefix_text = f"Strategy: {guide_text}\nSolution:\n"
+                    teacher_prefix_text = f"<HINT>\n{guide_text}\n</HINT>\n"
                     teacher_prefix_token_ids = tokenizer.encode(
                         teacher_prefix_text, add_special_tokens=False
                     )

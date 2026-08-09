@@ -15,11 +15,21 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
+from datasets import Dataset
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Full teacher-response parquet.")
+    parser.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "Original pre-rollout training parquet. Required for response files "
+            "whose nested prompt schema cannot be read as a complete Arrow table."
+        ),
+    )
     parser.add_argument("--output", required=True, help="Output teacher-prefix parquet.")
     parser.add_argument("--prefix-length", type=int, required=True)
     parser.add_argument("--force", action="store_true", help="Overwrite an existing output.")
@@ -27,8 +37,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def as_token_ids(value: object, row_index: int) -> list[int]:
-    if hasattr(value, "tolist"):
-        value = value.tolist()
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError(f"Row {row_index} has no teacher_response_token_ids.")
     return [int(token_id) for token_id in value]
@@ -43,7 +51,12 @@ def main() -> None:
     if output_path.exists() and not args.force:
         raise FileExistsError(f"Output already exists: {output_path}. Use --force to overwrite it.")
 
-    dataframe = pd.read_parquet(args.input).reset_index(drop=True)
+    # Eurus-Code's merged response parquet contains a nested prompt column.
+    # This PyArrow build cannot read that full schema, but it *can* read the
+    # flat teacher metadata plus list<int> generated IDs.  The untouched
+    # prompt/metadata are therefore loaded from the original source parquet
+    # below when --source is supplied.
+    response_file = pq.ParquetFile(args.input)
     required = {
         "teacher_response_token_ids",
         "teacher_response_finish_reason",
@@ -53,9 +66,11 @@ def main() -> None:
         "teacher_response_top_p",
         "teacher_response_enable_thinking",
     }
-    missing = required.difference(dataframe.columns)
+    missing = required.difference(response_file.schema_arrow.names)
     if missing:
         raise ValueError(f"Input is missing required columns: {sorted(missing)}")
+
+    response_table = response_file.read(columns=sorted(required))
 
     prefix_ids: list[list[int]] = []
     prefix_lens: list[int] = []
@@ -64,9 +79,13 @@ def main() -> None:
     complete_count = 0
     rollout_count = 0
 
-    for row_index, row in dataframe.iterrows():
-        response_ids = as_token_ids(row["teacher_response_token_ids"], row_index)
-        response_finish_reason = str(row["teacher_response_finish_reason"])
+    response_ids_column = response_table["teacher_response_token_ids"].to_pylist()
+    response_finish_reasons = response_table["teacher_response_finish_reason"].to_pylist()
+    for row_index, (raw_response_ids, raw_finish_reason) in enumerate(
+        zip(response_ids_column, response_finish_reasons, strict=True)
+    ):
+        response_ids = as_token_ids(raw_response_ids, row_index)
+        response_finish_reason = str(raw_finish_reason)
         is_complete_before_boundary = len(response_ids) <= args.prefix_length and response_finish_reason == "stop"
 
         if is_complete_before_boundary:
@@ -92,24 +111,43 @@ def main() -> None:
         # Token IDs, not this display column, are the training contract.
         prefix_texts.append("")
 
-    output = dataframe.drop(
-        columns=[column for column in dataframe.columns if column.startswith("teacher_response_")]
-    ).copy()
-    output["__opd_original_index"] = range(len(output))
+    if args.source is not None:
+        source_path = Path(args.source)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Source parquet does not exist: {source_path}")
+        output = pd.read_parquet(source_path).reset_index(drop=True)
+    else:
+        # Preserve the historical path for simple response files.  For nested
+        # files such as Eurus-Code callers must pass --source.
+        output = pd.read_parquet(args.input).drop(
+            columns=[column for column in response_file.schema_arrow.names if column.startswith("teacher_response_")]
+        ).reset_index(drop=True)
+
+    row_count = len(output)
+    if row_count != len(response_table):
+        raise RuntimeError(
+            f"Source/response row mismatch: source={row_count}, response={len(response_table)}"
+        )
+    output["__opd_original_index"] = range(row_count)
     output["teacher_prefix_text"] = prefix_texts
     output["teacher_prefix_token_ids"] = prefix_ids
     output["teacher_prefix_token_len"] = prefix_lens
     output["teacher_prefix_finish_reason"] = prefix_finish_reasons
-    output["teacher_prefix_model"] = dataframe["teacher_response_model"]
+    output["teacher_prefix_model"] = response_table["teacher_response_model"].to_pylist()
     output["teacher_prefix_max_tokens"] = args.prefix_length
-    output["teacher_prefix_temperature"] = dataframe["teacher_response_temperature"]
-    output["teacher_prefix_top_p"] = dataframe["teacher_response_top_p"]
-    output["teacher_prefix_enable_thinking"] = dataframe["teacher_response_enable_thinking"]
+    output["teacher_prefix_temperature"] = response_table["teacher_response_temperature"].to_pylist()
+    output["teacher_prefix_top_p"] = response_table["teacher_response_top_p"].to_pylist()
+    output["teacher_prefix_enable_thinking"] = response_table["teacher_response_enable_thinking"].to_pylist()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output.to_parquet(output_path, index=False)
+    # pandas.to_parquet produces a pandas schema with ``large_string`` fields.
+    # In the installed PyArrow/HF-datasets combination that schema is not
+    # readable once the nested ChatML ``prompt`` and list<int> prefix IDs occur
+    # together.  Re-enter through Dataset so the output carries the same
+    # HuggingFace-compatible Arrow feature metadata as the original Eurus data.
+    Dataset.from_pandas(output, preserve_index=False).to_parquet(str(output_path))
 
-    if len(output) != len(dataframe):
+    if len(output) != len(response_table):
         raise RuntimeError("Output row count changed unexpectedly.")
     if any(length <= 0 or length > args.prefix_length for length in prefix_lens):
         raise RuntimeError("Invalid output prefix lengths.")

@@ -622,6 +622,19 @@ class RLHFDataset(Dataset):
         row_dict["input_ids"] = input_ids[0]
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
+        # Keep a second, hint-free prompt representation.  The normal input_ids
+        # above are intentionally used for rollout (the student sees the hint),
+        # while the trainer can switch to these ids for offline OPD scoring.
+        base_prompt_input_ids, base_prompt_attention_mask = verl_F.postprocess_data(
+            input_ids=torch.tensor([base_prompt_ids], dtype=torch.long),
+            attention_mask=torch.ones((1, len(base_prompt_ids)), dtype=torch.long),
+            max_length=self.max_prompt_length,
+            pad_token_id=self.tokenizer.pad_token_id,
+            left_pad=True,
+            truncation=self.truncation,
+        )
+        row_dict["base_prompt_ids"] = base_prompt_input_ids[0]
+        row_dict["base_prompt_attention_mask"] = base_prompt_attention_mask[0]
         row_dict["teacher_prefix_sft_mask"] = teacher_prefix_sft_mask
         if "teacher_prefix_is_complete" not in locals():
             teacher_prefix_is_complete = False

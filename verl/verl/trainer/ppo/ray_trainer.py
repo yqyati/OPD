@@ -20,6 +20,9 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import errno
+import shutil
+import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -1105,13 +1108,16 @@ class RayPPOTrainer:
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
 
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
+        # Stage every distributed checkpoint into a private directory. A full
+        # filesystem/quota must never publish a partial global_step_N as a
+        # resumable checkpoint.
         local_global_step_folder = os.path.join(
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
         )
+        local_tmp_step_folder = f"{local_global_step_folder}.tmp"
 
         print(f"local_global_step_folder: {local_global_step_folder}")
-        actor_local_path = os.path.join(local_global_step_folder, "actor")
+        actor_local_path = os.path.join(local_tmp_step_folder, "actor")
 
         actor_remote_path = (
             None
@@ -1132,28 +1138,56 @@ class RayPPOTrainer:
             self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
 
-        self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
-        )
+        wait_enabled = bool(self.config.trainer.get("storage_wait_enabled", False))
+        wait_interval = max(1, int(self.config.trainer.get("storage_wait_interval_seconds", 60)))
 
-        if self.use_critic:
-            critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
-            critic_remote_path = (
-                None
-                if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(
-                    self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", str(Role.Critic)
+        def is_storage_error(exc: BaseException) -> bool:
+            seen: set[int] = set()
+            current: BaseException | None = exc
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                if isinstance(current, OSError) and current.errno in {errno.ENOSPC, errno.EDQUOT}:
+                    return True
+                text = str(current).lower()
+                if "disk quota exceeded" in text or "no space left on device" in text:
+                    return True
+                current = current.__cause__ or current.__context__
+            return False
+
+        attempt = 0
+        while True:
+            attempt += 1
+            shutil.rmtree(local_tmp_step_folder, ignore_errors=True)
+            try:
+                self.actor_rollout_wg.save_checkpoint(
+                    actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
                 )
-            )
-            self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
-            )
-
-        # save dataloader
-        local_mkdir_safe(local_global_step_folder)
-        dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
+                if self.use_critic:
+                    critic_local_path = os.path.join(local_tmp_step_folder, str(Role.Critic))
+                    critic_remote_path = (
+                        None
+                        if self.config.trainer.default_hdfs_dir is None
+                        else os.path.join(
+                            self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", str(Role.Critic)
+                        )
+                    )
+                    self.critic_wg.save_checkpoint(
+                        critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
+                    )
+                local_mkdir_safe(local_tmp_step_folder)
+                torch.save(self.train_dataloader.state_dict(), os.path.join(local_tmp_step_folder, "data.pt"))
+                os.rename(local_tmp_step_folder, local_global_step_folder)
+                break
+            except BaseException as exc:
+                if not wait_enabled or not is_storage_error(exc):
+                    raise
+                shutil.rmtree(local_tmp_step_folder, ignore_errors=True)
+                print(
+                    f"[storage-wait] checkpoint step {self.global_steps} hit {type(exc).__name__}: {exc}; "
+                    f"retrying after {wait_interval}s (attempt {attempt}).",
+                    flush=True,
+                )
+                time.sleep(wait_interval)
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
@@ -1408,6 +1442,35 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    # Hint-assisted offline OPD: rollout was sampled from the
+                    # hint-conditioned prompt, but all subsequent probability
+                    # computations must use the original prompt.  Rebuild the
+                    # model input as x + sampled response before teacher/student
+                    # log-prob recomputation and loss calculation.
+                    if self.config.data.get("remove_teacher_hint_for_training", False):
+                        base_prompt_ids = batch.batch["base_prompt_ids"]
+                        base_prompt_mask = batch.batch["base_prompt_attention_mask"]
+                        responses = batch.batch["responses"]
+                        response_mask = batch.batch.get("response_mask")
+                        if response_mask is None:
+                            response_mask = compute_response_mask(batch)
+                        batch.batch["input_ids"] = torch.cat(
+                            [base_prompt_ids, responses], dim=-1
+                        )
+                        batch.batch["attention_mask"] = torch.cat(
+                            [base_prompt_mask, response_mask], dim=-1
+                        )
+                        from verl.utils.dataset.rl_dataset import compute_position_id_with_mask
+
+                        batch.batch["position_ids"] = compute_position_id_with_mask(
+                            batch.batch["attention_mask"]
+                        )
+                        batch.batch["prompts"] = base_prompt_ids
+                        batch.batch["raw_prompt_ids"] = np.asarray(
+                            [row[-self.config.data.max_prompt_length :].tolist() for row in base_prompt_ids],
+                            dtype=object,
+                        )
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)

@@ -16,9 +16,11 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import errno
 import hashlib
 import json
 import os
+import time
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -30,6 +32,56 @@ from typing import Any
 # the complete path is otherwise valid. Keep a stable digest so the shortened
 # name is still unique and can be traced back to its full name in trainer logs.
 _MAX_TRACKING_PATH_COMPONENT_BYTES = 200
+_STORAGE_ERRNOS = {errno.ENOSPC, errno.EDQUOT}
+
+
+def _is_storage_exhaustion_error(exc: BaseException) -> bool:
+    """Return whether an exception is a recoverable local-storage exhaustion."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno in _STORAGE_ERRNOS:
+            return True
+        text = str(current).lower()
+        if "disk quota exceeded" in text or "no space left on device" in text:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _wait_for_storage(path: str, exc: BaseException) -> None:
+    """Block until a one-byte fsync probe succeeds on ``path``.
+
+    This intentionally waits rather than dropping metrics.  It is used only
+    after ENOSPC/EDQUOT, controlled by VERL_STORAGE_WAIT_ENABLED, and reports
+    regularly so an operator can free space without losing a live run.
+    """
+    if os.environ.get("VERL_STORAGE_WAIT_ENABLED", "0").lower() not in {"1", "true", "yes"}:
+        raise exc
+    interval = max(1, int(os.environ.get("VERL_STORAGE_WAIT_INTERVAL_SECONDS", "60")))
+    started = time.monotonic()
+    probe_path = os.path.join(path, ".verl_storage_wait_probe")
+    while True:
+        elapsed = int(time.monotonic() - started)
+        print(
+            f"[storage-wait] {type(exc).__name__}: {exc}; waiting for writable storage at {path} "
+            f"({elapsed}s elapsed, retry every {interval}s)",
+            flush=True,
+        )
+        time.sleep(interval)
+        try:
+            os.makedirs(path, exist_ok=True)
+            with open(probe_path, "ab") as probe:
+                probe.write(b".")
+                probe.flush()
+                os.fsync(probe.fileno())
+            os.unlink(probe_path)
+            print(f"[storage-wait] storage writable again at {path}; resuming.", flush=True)
+            return
+        except BaseException as probe_exc:
+            if not _is_storage_exhaustion_error(probe_exc):
+                raise
 
 
 def _safe_path_component(value: str, *, max_bytes: int = _MAX_TRACKING_PATH_COMPONENT_BYTES) -> str:
@@ -304,16 +356,46 @@ class _TensorboardAdapter:
                 "TensorBoard shortened an overlong experiment directory name: "
                 f"{experiment_name!r} -> {_safe_path_component(str(experiment_name))!r}"
             )
-        os.makedirs(tensorboard_dir, exist_ok=True)
-        print(f"Saving tensorboard log to {tensorboard_dir}.")
-        self.writer = SummaryWriter(tensorboard_dir)
+        self.tensorboard_dir = tensorboard_dir
+        self._SummaryWriter = SummaryWriter
+        self._open_writer()
+
+    def _open_writer(self):
+        while True:
+            try:
+                os.makedirs(self.tensorboard_dir, exist_ok=True)
+                print(f"Saving tensorboard log to {self.tensorboard_dir}.")
+                self.writer = self._SummaryWriter(self.tensorboard_dir)
+                return
+            except BaseException as exc:
+                if not _is_storage_exhaustion_error(exc):
+                    raise
+                _wait_for_storage(self.tensorboard_dir, exc)
 
     def log(self, data, step):
         for key in data:
-            self.writer.add_scalar(key, data[key], step)
+            while True:
+                try:
+                    self.writer.add_scalar(key, data[key], step)
+                    break
+                except BaseException as exc:
+                    if not _is_storage_exhaustion_error(exc):
+                        raise
+                    # TensorBoard's async writer thread is terminal after a
+                    # storage failure.  Wait, then create a fresh event file.
+                    _wait_for_storage(self.tensorboard_dir, exc)
+                    try:
+                        self.writer.close()
+                    except BaseException:
+                        pass
+                    self._open_writer()
 
     def finish(self):
-        self.writer.close()
+        try:
+            self.writer.close()
+        except BaseException as exc:
+            if not _is_storage_exhaustion_error(exc):
+                raise
 
 
 class _MlflowLoggingAdapter:
