@@ -78,7 +78,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=7168)
+    parser.add_argument("--n", type=int, default=1, help="Number of samples per item for avg@n evaluation.")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="Enable the model's thinking mode in the official chat template.",
+    )
     args = parser.parse_args()
 
     if not Path(args.model, "config.json").is_file():
@@ -110,13 +116,14 @@ def main() -> None:
             [{"role": "user", "content": item["question"]}],
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=args.enable_thinking,
         )
         for item in items
     ]
     outputs = llm.generate(
         prompts,
         SamplingParams(
+            n=args.n,
             temperature=args.temperature,
             top_p=args.top_p,
             max_tokens=args.max_tokens,
@@ -126,19 +133,39 @@ def main() -> None:
 
     reward = load_reward_module()
     records = []
-    summary = defaultdict(lambda: {"count": 0, "correct": 0, "by_group": defaultdict(lambda: {"count": 0, "correct": 0})})
+    summary = defaultdict(
+        lambda: {
+            "count": 0,
+            "correct": 0,
+            "avg_correct": 0.0,
+            "by_group": defaultdict(lambda: {"count": 0, "correct": 0, "avg_correct": 0.0}),
+        }
+    )
     for item, output in zip(items, outputs, strict=True):
-        response = output.outputs[0].text
-        score = reward.compute_score(response, item["answer"], item["answer_type"])
-        correct = int(score["score"])
-        record = {**item, "response": response, "prediction": score["pred"], "correct": correct}
+        sample_scores = [
+            reward.compute_score(sample.text, item["answer"], item["answer_type"])
+            for sample in output.outputs
+        ]
+        responses = [sample.text for sample in output.outputs]
+        correct = int(sample_scores[0]["score"])
+        avg_correct = sum(float(score["score"]) for score in sample_scores) / len(sample_scores)
+        record = {
+            **item,
+            "response": responses[0],
+            "prediction": sample_scores[0]["pred"],
+            "correct": correct,
+            "sample_scores": [int(score["score"]) for score in sample_scores],
+            "avg_score": avg_correct,
+        }
         records.append(record)
         stats = summary[item["benchmark"]]
         stats["count"] += 1
         stats["correct"] += correct
+        stats["avg_correct"] += avg_correct
         group_stats = stats["by_group"][item["group"]]
         group_stats["count"] += 1
         group_stats["correct"] += correct
+        group_stats["avg_correct"] += avg_correct
 
     with (output_dir / "generations.jsonl").open("w", encoding="utf-8") as handle:
         for record in records:
@@ -147,23 +174,29 @@ def main() -> None:
     final_summary = {}
     for benchmark, stats in summary.items():
         groups = {
-            group: {**group_stats, "accuracy": group_stats["correct"] / group_stats["count"]}
+            group: {
+                **group_stats,
+                "accuracy": group_stats["avg_correct"] / group_stats["count"],
+                "avg_accuracy": group_stats["avg_correct"] / group_stats["count"],
+            }
             for group, group_stats in sorted(stats["by_group"].items())
         }
         final_summary[benchmark] = {
             "count": stats["count"],
             "correct": stats["correct"],
-            "accuracy": stats["correct"] / stats["count"],
+            "avg_correct": stats["avg_correct"],
+            "accuracy": stats["avg_correct"] / stats["count"],
+            "avg_accuracy": stats["avg_correct"] / stats["count"],
             "by_group": groups,
         }
     metadata = {
         "model": args.model,
         "protocol": {
-            "n": 1,
+            "n": args.n,
             "temperature": args.temperature,
             "top_p": args.top_p,
             "max_tokens": args.max_tokens,
-            "thinking": False,
+            "thinking": args.enable_thinking,
             "scoring": "strict MCQ final-letter / numeric final-value rule verifier",
         },
         "benchmarks": final_summary,

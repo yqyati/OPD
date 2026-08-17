@@ -497,6 +497,9 @@ trainer:
   - wandb
   log_val_generations: 0
   rollout_data_dir: null
+  rollout_audit_dir: /data/verl_rollout_audit
+  rollout_audit_interval: 1
+  rollout_audit_samples_per_step: 4
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8

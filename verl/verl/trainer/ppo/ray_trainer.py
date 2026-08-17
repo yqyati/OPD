@@ -499,6 +499,120 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
+    @staticmethod
+    def _rollout_audit_value(value):
+        """Convert a batch metadata value to a JSON-safe scalar or nested value."""
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            return value.item() if value.numel() == 1 else value.tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, dict):
+            return {str(key): RayPPOTrainer._rollout_audit_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [RayPPOTrainer._rollout_audit_value(item) for item in value]
+        return value
+
+    def _maybe_dump_rollout_audit(self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict) -> None:
+        """Save a small deterministic random sample of the current training rollouts.
+
+        Unlike ``rollout_data_dir``, which writes every rollout in a batch, this
+        audit path is intended for inexpensive behavioral monitoring. It runs
+        after reward computation so JSONL records contain the actual sampled
+        response, sequence score, and any rule/OPD reward metadata.
+        """
+        audit_root = self.config.trainer.get("rollout_audit_dir", None)
+        if not audit_root:
+            return
+
+        interval = max(1, int(self.config.trainer.get("rollout_audit_interval", 1)))
+        if self.global_steps % interval != 0:
+            return
+        sample_count = max(0, int(self.config.trainer.get("rollout_audit_samples_per_step", 4)))
+        if sample_count == 0:
+            return
+
+        batch_size = len(batch.batch)
+        if batch_size == 0:
+            return
+        seed = int(self.config.data.get("seed", 0)) + int(self.global_steps)
+        rng = np.random.default_rng(seed)
+        indices = np.sort(rng.choice(batch_size, size=min(sample_count, batch_size), replace=False))
+
+        audit_dir = os.path.join(
+            os.path.expanduser(audit_root),
+            str(self.config.trainer.project_name),
+            str(self.config.trainer.experiment_name),
+        )
+        os.makedirs(audit_dir, exist_ok=True)
+        filename = os.path.join(audit_dir, f"step_{self.global_steps:06d}.jsonl")
+
+        with marked_timer("dump_rollout_audit", timing_raw, color="green"):
+            prompts = self.tokenizer.batch_decode(batch.batch["prompts"][indices], skip_special_tokens=True)
+            responses = self.tokenizer.batch_decode(batch.batch["responses"][indices], skip_special_tokens=True)
+            # Token scores can carry an additional top-k/component axis in
+            # token-level OPD. The audit only needs one scalar score per row.
+            token_scores = batch.batch["token_level_scores"]
+            scores = token_scores.reshape(token_scores.shape[0], -1).sum(-1).detach().cpu()
+            response_mask = batch.batch.get("response_mask")
+            response_lengths = response_mask.sum(-1).detach().cpu() if response_mask is not None else None
+            advantages = batch.batch.get("advantages")
+            advantage_means = None
+            if advantages is not None and response_mask is not None:
+                # Some objectives retain a final top-k/reward component in
+                # advantages, e.g. [batch, response_tokens, top_k]. Audit
+                # records one scalar per response, so reduce only such extra
+                # trailing components before applying the token mask.
+                audit_advantages = advantages
+                while audit_advantages.ndim > response_mask.ndim:
+                    audit_advantages = audit_advantages.mean(dim=-1)
+                if audit_advantages.shape == response_mask.shape:
+                    advantage_means = (
+                        (audit_advantages * response_mask).sum(-1).detach().cpu()
+                        / response_mask.sum(-1).clamp_min(1).detach().cpu()
+                    )
+
+            lines = []
+            for index, prompt, response in zip(indices.tolist(), prompts, responses, strict=True):
+                record = {
+                    "step": self.global_steps,
+                    "sample_index_in_rollout_batch": index,
+                    "rollout_audit_seed": seed,
+                    "input": prompt,
+                    "output": response,
+                    "score": float(scores[index].item()),
+                    "response_tokens": int(response_lengths[index].item()) if response_lengths is not None else None,
+                    "advantage_mean": float(advantage_means[index].item()) if advantage_means is not None else None,
+                }
+                if "reward_model" in batch.non_tensor_batch:
+                    reward_model = batch.non_tensor_batch["reward_model"][index]
+                    if isinstance(reward_model, dict):
+                        record["ground_truth"] = self._rollout_audit_value(reward_model.get("ground_truth"))
+                        record["reward_style"] = self._rollout_audit_value(reward_model.get("style"))
+                for key in ("data_source", "extra_info", "uid", "teacher_prefix_is_complete"):
+                    if key in batch.non_tensor_batch:
+                        record[key] = self._rollout_audit_value(batch.non_tensor_batch[key][index])
+                for key in (
+                    "constraint_pass_rate",
+                    "all_constraints_passed",
+                    "constraints_total",
+                    "constraints_passed",
+                    "true_reward_score",
+                    "online_prefix_selected_len",
+                    "online_prefix_selected_score",
+                ):
+                    if key in batch.non_tensor_batch:
+                        record[key] = self._rollout_audit_value(batch.non_tensor_batch[key][index])
+                    elif key in batch.batch:
+                        record[key] = self._rollout_audit_value(batch.batch[key][index])
+                lines.append(json.dumps(record, ensure_ascii=False, default=str))
+
+            with open(filename, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        print(f"Dumped {len(lines)} rollout audit samples to {filename}")
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -2648,6 +2762,18 @@ class RayPPOTrainer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+
+                    # Rollout audit is observability only. A malformed
+                    # metadata field or an unseen objective tensor shape must
+                    # never abort a training run.
+                    try:
+                        self._maybe_dump_rollout_audit(batch, reward_extra_infos_dict, timing_raw)
+                    except Exception as audit_error:
+                        print(
+                            f"WARNING: rollout audit failed at step {self.global_steps}; "
+                            f"continuing training without this audit: {audit_error}",
+                            flush=True,
+                        )
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

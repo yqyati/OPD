@@ -27,6 +27,10 @@ RESPONSE_PREFIX = (
     "problem and passes corresponding tests:"
 )
 MAX_SANITIZE_CHARS = 6000
+EURUS_CODE_SUFFIX = (
+    "\n\nWrite Python code to solve the problem. Present the code in \n"
+    "```python\nYour code\n```\nat the end."
+)
 
 
 def safe_sanitize(solution: str, entry_point: str) -> str:
@@ -56,7 +60,19 @@ def parse_args() -> argparse.Namespace:
     # shards. Smaller request batches prevent a few pathological completions
     # from consuming all host memory before their shard is saved.
     parser.add_argument("--max-tokens", type=int, default=16384)
-    parser.add_argument("--request-chunk-size", type=int, default=64)
+    parser.add_argument("--request-chunk-size", type=int, default=128)
+    parser.add_argument(
+        "--prompt-contract",
+        choices=("evalplus", "eurus"),
+        default="evalplus",
+        help="evalplus adds its reasoning instruction; eurus reproduces the code-training suffix exactly.",
+    )
+    parser.add_argument(
+        "--enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the model's native thinking mode in the chat template.",
+    )
     return parser.parse_args()
 
 
@@ -76,17 +92,29 @@ def completed_keys(path: Path) -> set[tuple[str, int]]:
     return completed
 
 
-def build_prompt(task: dict, tokenizer) -> tuple[str, bool]:
-    task_prompt = task["prompt"].strip() + "\n"
+def build_prompt(task: dict, tokenizer, enable_thinking: bool, prompt_contract: str) -> tuple[str, bool]:
+    task_prompt = task["prompt"].strip()
     direct_completion = tokenizer.chat_template is None
     if direct_completion:
-        return task_prompt, True
+        return task_prompt + "\n", True
+    if prompt_contract == "eurus":
+        task_prompt += EURUS_CODE_SUFFIX
+        return (
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": task_prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            ),
+            False,
+        )
     return (
         make_raw_chat_prompt(
             task_prompt,
             instruction_prefix=INSTRUCTION_PREFIX,
             response_prefix=RESPONSE_PREFIX,
             tokenizer=tokenizer,
+            enable_thinking=enable_thinking,
         ),
         False,
     )
@@ -125,7 +153,9 @@ def generate(args: argparse.Namespace) -> None:
     for task_index, (task_id, task) in enumerate(tasks):
         if task_index % args.world_size != args.rank:
             continue
-        prompt, direct_completion = build_prompt(task, tokenizer)
+        prompt, direct_completion = build_prompt(
+            task, tokenizer, args.enable_thinking, args.prompt_contract
+        )
         for sample_id in range(args.n_samples):
             if (task_id, sample_id) not in completed:
                 requests.append(
@@ -153,6 +183,8 @@ def generate(args: argparse.Namespace) -> None:
         dtype="bfloat16",
         trust_remote_code=True,
         enable_prefix_caching=True,
+        max_num_batched_tokens=65536,
+        max_num_seqs=64,
     )
     sampling_params = SamplingParams(
         n=1,

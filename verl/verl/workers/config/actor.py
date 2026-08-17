@@ -75,6 +75,9 @@ class ActorConfig(BaseConfig):
         teacher_prefix_sft_loss_coef (float): Auxiliary hard SFT loss coefficient for teacher-prefix tokens.
         teacher_prefix_sft_loss_agg_mode (str): Aggregation for teacher-prefix SFT loss.
         teacher_prefix_soft_kl_loss_coef (float): Auxiliary soft forward-KL coefficient for teacher-prefix tokens.
+        teacher_prefix_gradient_diagnostics (bool): Log separate prefix-SFT and policy gradient statistics.
+        teacher_prefix_gradient_diagnostics_no_update (bool): Skip optimizer updates during gradient diagnostics.
+        teacher_prefix_gradient_diagnostics_loss_mode (str): Objective selected for an isolated gradient measurement.
         use_kl_loss (bool): Whether to use KL divergence loss.
         use_torch_compile (bool): Whether to use torch.compile for optimization.
         kl_loss_coef (float): KL divergence loss coefficient.
@@ -112,6 +115,9 @@ class ActorConfig(BaseConfig):
     teacher_prefix_sft_loss_coef: float = 0.0
     teacher_prefix_sft_loss_agg_mode: str = "token-mean"
     teacher_prefix_soft_kl_loss_coef: float = 0.0
+    teacher_prefix_gradient_diagnostics: bool = False
+    teacher_prefix_gradient_diagnostics_no_update: bool = False
+    teacher_prefix_gradient_diagnostics_loss_mode: str = "combined"
     use_kl_loss: bool = False
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001

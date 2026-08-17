@@ -1125,6 +1125,16 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
+    def _gradient_norm_without_clipping(self):
+        """Return the global gradient norm without modifying gradients."""
+        grad_sq_sum = torch.zeros((), dtype=torch.float64, device=get_device_id())
+        for parameter in self.actor_module.parameters():
+            if parameter.grad is not None:
+                grad_sq_sum += parameter.grad.detach().double().square().sum()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(grad_sq_sum, op=torch.distributed.ReduceOp.SUM)
+        return grad_sq_sum.sqrt()
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
@@ -1305,6 +1315,20 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
+
+                # Keep separate, loss-scale-corrected gradient sums for the entire
+                # PPO minibatch.  Per-microbatch norms cannot describe the actual
+                # optimizer update because gradients can cancel across examples.
+                gradient_diagnostics_enabled = (
+                    use_teacher_prefix_sft
+                    and self.config.get("teacher_prefix_gradient_diagnostics", False)
+                )
+                diagnostic_loss_mode = self.config.get("teacher_prefix_gradient_diagnostics_loss_mode", "combined")
+                if diagnostic_loss_mode not in {"combined", "opd", "prefix_sft"}:
+                    raise ValueError(
+                        "teacher_prefix_gradient_diagnostics_loss_mode must be one of "
+                        "'combined', 'opd', or 'prefix_sft'"
+                    )
 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
@@ -1551,12 +1575,33 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * loss_scale_factor
                     else:
                         loss = policy_loss * loss_scale_factor
+                    if gradient_diagnostics_enabled:
+                        if diagnostic_loss_mode == "opd":
+                            loss = pg_loss * loss_scale_factor
+                        elif diagnostic_loss_mode == "prefix_sft":
+                            loss = teacher_prefix_sft_loss * loss_scale_factor
                     loss.backward()
 
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
-                grad_norm = self._optimizer_step()
+                if gradient_diagnostics_enabled and self.config.get(
+                    "teacher_prefix_gradient_diagnostics_no_update", False
+                ):
+                    grad_norm = self._gradient_norm_without_clipping()
+                    append_to_dict(
+                        metrics,
+                        {
+                            "actor/gradient_diagnostic_total_grad_norm": grad_norm.item(),
+                            "actor/gradient_diagnostic_loss_mode": {
+                                "opd": 0.0,
+                                "prefix_sft": 1.0,
+                                "combined": 2.0,
+                            }[diagnostic_loss_mode],
+                        },
+                    )
+                else:
+                    grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()

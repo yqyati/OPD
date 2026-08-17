@@ -44,3 +44,7 @@ datasets/
 gold_checkpoint/
 paper/
 insight/
+
+# Locally cloned/downloaded third-party dependencies.  Recreate the required
+# dependencies with scripts/setup/bootstrap_third_party.sh.
+/third_party/

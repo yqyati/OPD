@@ -20,6 +20,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--response-column", default="teacher_response_text")
     parser.add_argument("--ground-truth-column", default="reward_model")
+    parser.add_argument(
+        "--require-stop",
+        action="store_true",
+        help="Only retain naturally stopped generations.",
+    )
+    parser.add_argument(
+        "--require-complete-thinking",
+        action="store_true",
+        help="Only retain responses containing a closing </think> tag.",
+    )
     return parser.parse_args()
 
 
@@ -41,6 +51,16 @@ def main() -> None:
     format_scores = []
     for _, row in df.iterrows():
         response = row.get(args.response_column, "")
+        if args.require_stop and row.get("teacher_response_finish_reason") != "stop":
+            keep.append(False)
+            scores.append(0.0)
+            format_scores.append(0.0)
+            continue
+        if args.require_complete_thinking and "</think>" not in str(response):
+            keep.append(False)
+            scores.append(0.0)
+            format_scores.append(0.0)
+            continue
         gt = extract_ground_truth(row, args.ground_truth_column)
         result = compute_score(str(response), str(gt), fast=False)
         acc = bool(result.get("acc", False))

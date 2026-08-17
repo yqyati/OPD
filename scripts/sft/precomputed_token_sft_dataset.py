@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import bisect
 from typing import Any
 
 import numpy as np
-import pandas as pd
+import pyarrow.parquet as parquet
 import torch
 from omegaconf import ListConfig
 from torch.utils.data import Dataset
@@ -24,21 +25,52 @@ class PrecomputedTokenSFTDataset(Dataset):
             raise ValueError("PrecomputedTokenSFTDataset requires data.pad_mode=right")
         if not isinstance(parquet_files, list | ListConfig):
             parquet_files = [parquet_files]
-        frames = [pd.read_parquet(copy_local_path_from_hdfs(path, verbose=True)) for path in parquet_files]
-        self.dataframe = pd.concat(frames, ignore_index=True)
-        if max_samples > 0 and max_samples < len(self.dataframe):
-            self.dataframe = self.dataframe.iloc[:max_samples].reset_index(drop=True)
+        self._files = []
+        self._file_starts = []
+        total_rows = 0
+        for path in parquet_files:
+            file = parquet.ParquetFile(copy_local_path_from_hdfs(path, verbose=True))
+            columns = set(file.schema_arrow.names)
+            required = {"precomputed_input_ids", "precomputed_loss_mask"}
+            missing = required.difference(columns)
+            if missing:
+                raise ValueError(f"Missing precomputed SFT columns: {sorted(missing)}")
+            row_group_starts = []
+            row_group_total = 0
+            for group_index in range(file.num_row_groups):
+                row_group_starts.append(row_group_total)
+                row_group_total += file.metadata.row_group(group_index).num_rows
+            self._file_starts.append(total_rows)
+            self._files.append((file, row_group_starts, row_group_total))
+            total_rows += row_group_total
+        self.length = min(total_rows, max_samples) if max_samples > 0 else total_rows
+        self._cached_key = None
+        self._cached_rows = None
         required = {"precomputed_input_ids", "precomputed_loss_mask"}
-        missing = required.difference(self.dataframe.columns)
-        if missing:
-            raise ValueError(f"Missing precomputed SFT columns: {sorted(missing)}")
-        print(f"precomputed token dataset len: {len(self.dataframe)}")
+        if self.length == 0:
+            raise ValueError("Precomputed SFT dataset is empty")
+        print(f"precomputed token dataset len: {self.length}")
 
     def __len__(self) -> int:
-        return len(self.dataframe)
+        return self.length
 
     def __getitem__(self, item: int) -> dict[str, Any]:
-        row = self.dataframe.iloc[item]
+        if item < 0 or item >= self.length:
+            raise IndexError(item)
+        file_index = bisect.bisect_right(self._file_starts, item) - 1
+        file, row_group_starts, _ = self._files[file_index]
+        local_item = item - self._file_starts[file_index]
+        row_group_index = bisect.bisect_right(row_group_starts, local_item) - 1
+        row_in_group = local_item - row_group_starts[row_group_index]
+        cache_key = (file_index, row_group_index)
+        if self._cached_key != cache_key:
+            table = file.read_row_group(
+                row_group_index,
+                columns=["precomputed_input_ids", "precomputed_loss_mask"],
+            )
+            self._cached_rows = table.to_pylist()
+            self._cached_key = cache_key
+        row = self._cached_rows[row_in_group]
         input_ids = [int(value) for value in row["precomputed_input_ids"]]
         loss_mask = [int(value) for value in row["precomputed_loss_mask"]]
         if len(input_ids) != len(loss_mask):

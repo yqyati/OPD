@@ -19,8 +19,6 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "data_filter"))
 
-from score_prompt_opd_data import extract_prompt_text
-
 
 GUIDE_INSTRUCTION = (
     "Help a smaller model solve the problem. Think through it internally, then write one concise and actionable "
@@ -31,9 +29,37 @@ GUIDE_INSTRUCTION = (
 ANSWER_LEAK_PATTERN = re.compile(r"\\boxed\s*\{|(?:final\s+)?answer\s+is", re.IGNORECASE)
 
 
+def extract_prompt_text(row: pd.Series) -> str:
+    """Extract the problem text without importing the torch-based scorer.
+
+    Hint-data generation only needs dataframe normalization and vLLM.  Keeping
+    this lightweight helper local avoids importing score_prompt_opd_data at
+    module load time, which would require torch before generation starts.
+    """
+    if "prompt" in row and row["prompt"] is not None:
+        prompt = row["prompt"]
+        if hasattr(prompt, "tolist"):
+            prompt = prompt.tolist()
+        if isinstance(prompt, (list, tuple)) and prompt:
+            item = prompt[0]
+            if isinstance(item, dict) and "content" in item:
+                return str(item["content"]).strip()
+        if isinstance(prompt, str):
+            return prompt.strip()
+    for column in ("problem", "question"):
+        if column in row and row[column] is not None:
+            return str(row[column]).strip()
+    raise ValueError("Cannot find prompt/problem/question column in row.")
+
+
 def normalize_hint(text: str) -> str:
-    hint = " ".join((text or "").strip().split())
-    hint = hint.replace("<HINT>", "").replace("</HINT>", "").strip().strip('"')
+    raw = (text or "").strip()
+    # Accept only a complete tagged block.  Untagged thinking or a truncated
+    # generation must never be silently converted into a training hint.
+    match = re.search(r"<HINT>\s*(.*?)\s*</HINT>", raw, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return ""
+    hint = " ".join(match.group(1).strip().split()).strip('"')
     changed = True
     while changed:
         changed = False
@@ -58,6 +84,18 @@ def select_hint_candidate(generated_candidates) -> tuple[object, str, bool]:
         ranked.append((not valid, candidate_idx, len(generated.token_ids), generated, hint, valid))
     _, _, _, generated, hint, valid = min(ranked, key=lambda item: (item[0], item[1], item[2]))
     return generated, hint, valid
+
+
+def build_retry_guide_chat(row: pd.Series) -> list[dict]:
+    problem = extract_problem(row)
+    retry_instruction = (
+        "Return exactly one block and nothing else: <HINT>one concise actionable hint</HINT>. "
+        "Do not include a final answer, boxed answer, or any text outside the HINT tags."
+    )
+    return [
+        {"role": "system", "content": retry_instruction},
+        {"role": "user", "content": problem},
+    ]
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,6 +168,12 @@ def main() -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_jsonl = output_path.with_suffix(".jsonl.tmp")
+    if args.force:
+        # A previous interrupted run may have a partial temp file whose rows
+        # were generated with older parsing rules.  Force mode must regenerate
+        # those rows rather than treating them as completed.
+        if temp_jsonl.exists():
+            temp_jsonl.unlink()
     completed = load_completed(temp_jsonl)
     pending = [i for i in range(len(df)) if i not in completed]
     print(f"Loaded {len(df)} prompts. Pending teacher-guide generation: {len(pending)}")
@@ -150,7 +194,9 @@ def main() -> None:
             temperature=args.temperature,
             top_p=args.top_p,
             max_tokens=args.max_new_tokens,
-            stop=["</HINT>"],
+            # Do not stop on </HINT>: vLLM removes the stop string from the
+            # returned text, which would make strict tagged-block parsing fail.
+            stop=None,
         )
 
         with temp_jsonl.open("a", encoding="utf-8") as f_out:
@@ -168,7 +214,24 @@ def main() -> None:
                 outputs = llm.generate(prompts, sampling)
                 for idx, output in zip(batch_indices, outputs, strict=True):
                     generated, guide_text, candidate_valid = select_hint_candidate(output.outputs)
-                    teacher_prefix_text = f"<HINT>\n{guide_text}\n</HINT>\n"
+                    retry_count = 0
+                    invalid_reason = ""
+                    if not candidate_valid:
+                        retry_count = 1
+                        retry_prompt = tokenizer.apply_chat_template(
+                            build_retry_guide_chat(df.iloc[idx]),
+                            tokenize=False,
+                            add_generation_prompt=True,
+                            enable_thinking=False,
+                        )
+                        retry_output = llm.generate([retry_prompt], sampling)[0]
+                        generated, guide_text, candidate_valid = select_hint_candidate(retry_output.outputs)
+                        if not candidate_valid:
+                            invalid_reason = "retry_failed_plain_fallback"
+
+                    # A failed retry is deliberately a plain-OPD sample: keep
+                    # the row but provide no teacher prefix at all.
+                    teacher_prefix_text = f"<HINT>\n{guide_text}\n</HINT>\n" if candidate_valid else ""
                     teacher_prefix_token_ids = tokenizer.encode(
                         teacher_prefix_text, add_special_tokens=False
                     )
@@ -187,6 +250,8 @@ def main() -> None:
                         "teacher_hint_prompt_type": "direct_hint_v3_tagged_four_candidates_separate_generation_prompt",
                         "teacher_hint_candidate_valid": candidate_valid,
                         "teacher_hint_num_candidates": args.num_candidates,
+                        "teacher_hint_retry_count": retry_count,
+                        "teacher_hint_invalid_reason": invalid_reason,
                     }
                     f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f_out.flush()
@@ -200,11 +265,16 @@ def main() -> None:
 
     guide_df = pd.DataFrame([completed[i] for i in range(len(df))])
     out_df = df.merge(guide_df, on="__teacher_guide_row_id", how="left")
-    if out_df["teacher_prefix_text"].isna().any():
-        raise RuntimeError("Merged output contains empty teacher_prefix_text rows.")
+    out_df["teacher_prefix_text"] = out_df["teacher_prefix_text"].fillna("")
     out_df = out_df.drop(columns=["__teacher_guide_row_id"])
     out_df.to_parquet(output_path, index=False)
-    print(f"Wrote {output_path} ({len(out_df)} rows)")
+    valid_count = int(out_df["teacher_hint_candidate_valid"].fillna(False).astype(bool).sum())
+    plain_fallback_count = len(out_df) - valid_count
+    retry_count = int((out_df["teacher_hint_retry_count"].fillna(0) > 0).sum())
+    print(
+        f"Wrote {output_path} ({len(out_df)} rows); valid_hints={valid_count}; "
+        f"retry_attempted={retry_count}; plain_fallback={plain_fallback_count}"
+    )
 
 
 if __name__ == "__main__":

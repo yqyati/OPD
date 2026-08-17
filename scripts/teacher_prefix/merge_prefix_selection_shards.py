@@ -7,6 +7,8 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as parquet
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,24 +26,26 @@ def main() -> None:
         print(f"{output} already exists. Use --force to overwrite.")
         return
 
-    frames = []
+    tables = []
     for path in args.inputs:
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(p)
-        frames.append(pd.read_parquet(p))
+        tables.append(parquet.read_table(p))
 
-    df = pd.concat(frames, ignore_index=True)
-    if "__prefix_select_original_index" in df.columns:
-        df = df.sort_values("__prefix_select_original_index").reset_index(drop=True)
-        df = df.drop(columns=["__prefix_select_original_index"])
-    elif "__opd_original_index" in df.columns:
-        df = df.sort_values("__opd_original_index").reset_index(drop=True)
-        df = df.drop(columns=["__opd_original_index"])
+    table = pa.concat_tables(tables, promote_options="default")
+    sort_column = None
+    if "__prefix_select_original_index" in table.column_names:
+        sort_column = "__prefix_select_original_index"
+    elif "__opd_original_index" in table.column_names:
+        sort_column = "__opd_original_index"
+    if sort_column is not None:
+        order = sorted(range(table.num_rows), key=lambda i: table[sort_column][i].as_py())
+        table = table.take(pa.array(order, type=pa.int64())).drop([sort_column])
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output, index=False)
-    print(f"Wrote {output} ({len(df)} rows)")
+    parquet.write_table(table, output, compression="zstd")
+    print(f"Wrote {output} ({table.num_rows} rows)")
 
 
 if __name__ == "__main__":

@@ -147,6 +147,13 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
+  # Lightweight training-rollout audit. Each step stores a deterministic random
+  # sample from the already generated rollouts; unlike rollout_data_dir it does
+  # not dump the entire batch.
+  rollout_audit_dir: /data/verl_rollout_audit
+  rollout_audit_interval: 1
+  rollout_audit_samples_per_step: 4
+
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 

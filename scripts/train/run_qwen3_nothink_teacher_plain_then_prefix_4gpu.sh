@@ -89,6 +89,13 @@ if [ -n "${REWARD_MODEL_INPUT_TOKENIZER}" ]; then
     REWARD_INPUT_TOKENIZER_ARG="reward_model.model.input_tokenizer=${REWARD_MODEL_INPUT_TOKENIZER}"
 fi
 
+# EXTRA_PPO_ARGS is supplied by launchers as whitespace-separated Hydra overrides.
+# Pass it as an argument array so multiple overrides remain part of the Python command.
+EXTRA_PPO_ARG_ARRAY=()
+if [ -n "${EXTRA_PPO_ARGS:-}" ]; then
+    read -r -a EXTRA_PPO_ARG_ARRAY <<< "${EXTRA_PPO_ARGS}"
+fi
+
 if [ "$RUN_MODE" = "sequence" ]; then
     echo "RUN_MODE=sequence: run plain OPD first, then generate no-think teacher prefix, then run prefix OPD."
     if ! RUN_MODE=plain ENABLE_THINKING="$ENABLE_THINKING" N_GPUS_PER_NODE="$N_GPUS_PER_NODE" EVAL_GPUS="$EVAL_GPUS" bash "$0"; then
@@ -151,6 +158,7 @@ export USE_KL=${USE_KL:-False} # TODO: True / False (default False)
 export ENABLE_FORMAT_REWARD=${ENABLE_FORMAT_REWARD:-False} # TODO: True / False (default False)
 export MODEL_DTYPE=${MODEL_DTYPE:-bfloat16} # actor/ref/critic fsdp_config.model_dtype: fp32 or bfloat16
 export IS_PLOT=${IS_PLOT:-False} # TODO: True / False (default False)
+export SAVE_FREQ=${SAVE_FREQ:-100}
 export LOSS_AGG_MODE=${LOSS_AGG_MODE:-"token-mean"} # TODO: "token-mean" / "seq-mean-token-sum" / "seq-mean-token-mean" / "seq-mean-token-sum-norm" (default "token-mean")
 export RUN_MODE=${RUN_MODE:-plain} # plain / prefix
 if [ -z "${TEACHER_PREFIX_SFT_LOSS_COEF+x}" ]; then
@@ -453,7 +461,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.validation_data_dir=validation_log/$EXPERIMENT_NAME \
     trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
     trainer.nnodes=1 \
-    trainer.save_freq=100 \
+    trainer.save_freq=$SAVE_FREQ \
     trainer.storage_wait_enabled=True \
     trainer.storage_wait_interval_seconds=${VERL_STORAGE_WAIT_INTERVAL_SECONDS} \
     trainer.test_freq=-1 \
@@ -461,12 +469,20 @@ python3 -m verl.trainer.main_ppo \
     $TOTAL_TRAINING_STEPS_ARGS \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT \
-    ${EXTRA_PPO_ARGS:-}
+    "${EXTRA_PPO_ARG_ARRAY[@]}"
 TRAIN_EXIT=$?
 set -e
 
 echo "Training exit code: ${TRAIN_EXIT}"
 echo "Checkpoint path: ${CKPT_PATH}"
+if [ "${DIAGNOSTIC_ONLY:-False}" = "True" ]; then
+    echo "DIAGNOSTIC_ONLY=True: no checkpoint merge or evaluation requested."
+    exit "${TRAIN_EXIT}"
+fi
+if [ "${TRAIN_EXIT}" -ne 0 ]; then
+    echo "Training failed before checkpoint discovery; preserving logs and skipping merge/evaluation." >&2
+    exit "${TRAIN_EXIT}"
+fi
 
 STEP=${STEP:-latest}
 if [ "${STEP}" = "latest" ]; then
