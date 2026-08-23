@@ -93,6 +93,7 @@ class DataParallelPPOActor(BasePPOActor):
         student_top_k_ids=None,
         return_full_log_probs=False,
         full_target_ids=None,
+        mopd_memory_efficient_logprob=False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -228,11 +229,12 @@ class DataParallelPPOActor(BasePPOActor):
                         # Compute log_softmax once for both target and topk tokens
                         # Note: we don't use inplace_backward here to ensure correct gradients
                         # when both log_probs and topk_log_probs are needed
-                        log_probs_all = torch.log_softmax(logits_rmpad, dim=-1)
-                        # Gather log_probs for target tokens
-                        log_probs = log_probs_all.gather(
-                            dim=-1, index=input_ids_rmpad_rolled.unsqueeze(-1)
-                        ).squeeze(-1)
+                        log_probs_all = None
+                        if not (mopd_memory_efficient_logprob and need_topk and not need_full_target_log_probs):
+                            log_probs_all = torch.log_softmax(logits_rmpad, dim=-1)
+                            log_probs = log_probs_all.gather(
+                                dim=-1, index=input_ids_rmpad_rolled.unsqueeze(-1)
+                            ).squeeze(-1)
                     else:
                         log_probs = logprobs_from_logits(
                             logits=logits_rmpad,
@@ -242,7 +244,11 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # compute entropy
                     if calculate_entropy:
-                        if not self.config.entropy_checkpointing:
+                        if mopd_memory_efficient_logprob:
+                            from verl.mopd.logprob import entropy_from_logits_by_token_chunks
+
+                            entropy_rmpad = entropy_from_logits_by_token_chunks(logits_rmpad)
+                        elif not self.config.entropy_checkpointing:
                             entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
                         else:
                             entropy_rmpad = torch.utils.checkpoint.checkpoint(
@@ -291,8 +297,16 @@ class DataParallelPPOActor(BasePPOActor):
                              # Legacy/Resample behavior
                              _, topk_ids = torch.topk(logits_rmpad, k=top_k, dim=-1)
 
-                        # Use pre-computed log_probs_all (always available when need_topk=True)
-                        topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
+                        if mopd_memory_efficient_logprob and not need_full_target_log_probs:
+                            from verl.mopd.logprob import gather_log_probs_by_token_chunks
+
+                            log_probs, topk_log_probs = gather_log_probs_by_token_chunks(
+                                logits_rmpad,
+                                input_ids_rmpad_rolled,
+                                topk_ids,
+                            )
+                        else:
+                            topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
                     if need_full_target_log_probs:
                         full_target_ids_local = full_target_ids
                         flat_full_target_ids = full_target_ids_local.view(-1, full_target_ids_local.shape[-1])
@@ -410,34 +424,58 @@ class DataParallelPPOActor(BasePPOActor):
                     logits.div_(temperature)
                     logits_for_response = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
 
-                    # Optimization: when top_k > 0, compute log_softmax once and gather both
-                    # log_probs and topk_log_probs to avoid duplicate computation
                     need_topk = top_k > 0
                     if need_topk:
-                        # Compute log_softmax once for both target and topk tokens
-                        log_probs_all = torch.log_softmax(logits_for_response, dim=-1)
-                        # Gather log_probs for target tokens (responses)
-                        log_probs = log_probs_all.gather(
-                            dim=-1, index=micro_batch["responses"].unsqueeze(-1)
-                        ).squeeze(-1)
+                        log_probs_all = None
+                        if not (mopd_memory_efficient_logprob and not need_full_target_log_probs):
+                            log_probs_all = torch.log_softmax(logits_for_response, dim=-1)
+                            log_probs = log_probs_all.gather(
+                                dim=-1, index=micro_batch["responses"].unsqueeze(-1)
+                            ).squeeze(-1)
                     else:
                         log_probs = logprobs_from_logits(logits_for_response, micro_batch["responses"])
                     
                     if calculate_entropy:
-                        if not self.config.entropy_checkpointing:
+                        if mopd_memory_efficient_logprob:
+                            from verl.mopd.logprob import entropy_from_logits_by_token_chunks
+
+                            entropy = entropy_from_logits_by_token_chunks(logits_for_response)
+                        elif not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits_for_response)  # (bsz, response_length)
                         else:
                             entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits_for_response)
                     
                     if need_topk:
                         if student_top_k_ids is not None:
+                             # The actor contract is response-aligned top-k ids.
+                             # Do not silently accept full prompt+response tensors:
+                             # that is a producer-side shape bug.
+                             if (
+                                 student_top_k_ids.ndim != 3
+                                 or student_top_k_ids.shape[1] != response_length
+                             ):
+                                 raise ValueError(
+                                     "student_top_k_ids must have shape "
+                                     f"(batch, response_length={response_length}, top_k); "
+                                     f"got {tuple(student_top_k_ids.shape)}"
+                                 )
                              topk_ids = student_top_k_ids
-                             # Ensure shape alignment if needed, but for non-rmpad (bsz, seq, k) should match logits (bsz, seq, vocab) dim 0,1
                         else:
-                             _, topk_ids = torch.topk(logits, k=top_k, dim=-1)
+                             # log_probs_all is defined on response positions only;
+                             # taking top-k from full-sequence logits would produce
+                             # prompt+response ids and make gather dimension 1 diverge.
+                             _, topk_ids = torch.topk(logits_for_response, k=top_k, dim=-1)
                         
-                        # Use pre-computed log_probs_all (always available when need_topk=True)
-                        topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
+                        if mopd_memory_efficient_logprob:
+                            from verl.mopd.logprob import gather_log_probs_by_token_chunks
+
+                            log_probs, topk_log_probs = gather_log_probs_by_token_chunks(
+                                logits_for_response,
+                                micro_batch["responses"],
+                                topk_ids,
+                            )
+                        else:
+                            topk_log_probs = log_probs_all.gather(dim=-1, index=topk_ids)
                     if need_full_target_log_probs:
                         full_log_probs_all = torch.log_softmax(logits, dim=-1)
                         full_target_log_probs_for_return = full_log_probs_all.gather(dim=-1, index=full_target_ids)
@@ -947,6 +985,7 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        mopd_memory_efficient_logprob = data.meta_info.get("mopd_memory_efficient_logprob", False)
 
         # 2. Compute Student Log Probs on Teacher IDs if needed
         # (This replaces the previous call to compute_log_probs_for_ids in ray_trainer)
@@ -978,7 +1017,8 @@ class DataParallelPPOActor(BasePPOActor):
                 with torch.no_grad():
                     _, _, _, topk_log_probs = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=False, 
-                        top_k=top_k, student_top_k_ids=mb_target_ids
+                        top_k=top_k, student_top_k_ids=mb_target_ids,
+                        mopd_memory_efficient_logprob=mopd_memory_efficient_logprob,
                     )
                 S_on_T_lst.append(topk_log_probs)
 
@@ -1042,7 +1082,22 @@ class DataParallelPPOActor(BasePPOActor):
             kl_val = S_logp - T_on_S
             valid_mask = torch.ones_like(S_logp, dtype=torch.bool)
             norm_weights = compute_reward_weights(S_logp, T_on_S, valid_mask, reward_weight_mode)
-            rm_scores = -kl_val * norm_weights
+            mopd_advantage_clip = data.meta_info.get("mopd_advantage_clip", None)
+            if mopd_advantage_clip is None:
+                # Legacy single-teacher OPD behaviour: leave the existing
+                # reverse-KL reward exactly unchanged.
+                rm_scores = -kl_val * norm_weights
+            else:
+                from verl.mopd.objective import compute_mopd_only_student_reward
+
+                rm_scores, diagnostics = compute_mopd_only_student_reward(
+                    student_log_probs=S_logp,
+                    teacher_on_student_log_probs=T_on_S,
+                    response_mask=data.batch["response_mask"],
+                    reward_weight_mode=reward_weight_mode,
+                    max_abs_advantage=float(mopd_advantage_clip),
+                )
+                res_tensors.update(diagnostics)
             
         elif strategy == "only_tch":
             kl_val = S_on_T - T_logp
@@ -1159,6 +1214,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        mopd_memory_efficient_logprob = data.meta_info.get("mopd_memory_efficient_logprob", False)
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
@@ -1185,7 +1241,8 @@ class DataParallelPPOActor(BasePPOActor):
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
                 entropy, log_probs, topk_ids, topk_log_probs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, top_k=top_k
+                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, top_k=top_k,
+                    mopd_memory_efficient_logprob=mopd_memory_efficient_logprob,
                 )
             # Keep on GPU to avoid expensive CPU-GPU transfer for large top-k
             # log_probs = log_probs.to("cpu")
@@ -1226,6 +1283,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        mopd_memory_efficient_logprob = data.meta_info.get("mopd_memory_efficient_logprob", False)
 
         select_keys = [
             "responses",
@@ -1375,6 +1433,7 @@ class DataParallelPPOActor(BasePPOActor):
                             top_k=top_k, student_top_k_ids=student_top_k_ids,
                             return_full_log_probs=use_teacher_prefix_sft,
                             full_target_ids=teacher_prefix_full_target_ids,
+                            mopd_memory_efficient_logprob=mopd_memory_efficient_logprob,
                         )
                         if use_teacher_prefix_sft and use_teacher_prefix_soft_kl:
                             entropy, _, _, topk_log_probs, full_log_probs, teacher_prefix_student_top_k_log_probs = forward_outputs
@@ -1393,6 +1452,7 @@ class DataParallelPPOActor(BasePPOActor):
                             calculate_entropy=calculate_entropy,
                             return_full_log_probs=use_teacher_prefix_sft,
                             full_target_ids=teacher_prefix_full_target_ids,
+                            mopd_memory_efficient_logprob=mopd_memory_efficient_logprob,
                         )
                         if use_teacher_prefix_sft and use_teacher_prefix_soft_kl:
                             _, log_prob, *_, full_log_probs, teacher_prefix_student_top_k_log_probs = forward_outputs

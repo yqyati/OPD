@@ -298,6 +298,7 @@ class RayPPOTrainer:
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
         device_name=None,
+        mopd_runtime=None,
     ):
         """
         Initialize distributed PPO trainer with Ray backend.
@@ -325,6 +326,8 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
+        self.mopd_runtime = mopd_runtime
+        self.use_mopd = mopd_runtime is not None
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -335,7 +338,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
-        self.use_rm = need_reward_model(self.role_worker_mapping)
+        self.use_rm = need_reward_model(self.role_worker_mapping) or self.use_mopd
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -1153,7 +1156,7 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         # create a reward model if reward_fn is None
-        if self.use_rm:
+        if self.use_rm and not self.use_mopd:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
@@ -1201,7 +1204,7 @@ class RayPPOTrainer:
 
         self.rm_wg = None
         # initalization of rm_wg will be deprecated in the future
-        if self.use_rm:
+        if self.use_rm and not self.use_mopd:
             self.rm_wg = all_wg[str(Role.RewardModel)]
             self.rm_wg.init_model()
 
@@ -1602,6 +1605,10 @@ class RayPPOTrainer:
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             with marked_timer("compute_log_prob", timing_raw, color="blue"):
+                                if self.use_mopd:
+                                    # Opt into MOPD-only token-chunked log-prob computation.
+                                    # Legacy OPD never receives this marker.
+                                    batch.meta_info["mopd_memory_efficient_logprob"] = True
                                 # First forward, get student top k ids and log probs
                                 if os.environ.get("VERL_DEBUG_WORKER_LOGS") == "1":
                                     print("First forward, get student top k ids and log probs")
@@ -1633,9 +1640,18 @@ class RayPPOTrainer:
                             batch.meta_info["teacher_temperature"] = teacher_temperature
                             batch.meta_info["canonical_eos_token_id"] = canonical_eos_token_id
                             batch.meta_info["teacher_source_eos_token_id"] = teacher_source_eos_token_id
+                            if self.use_mopd:
+                                batch.meta_info["mopd_advantage_clip"] = self.mopd_runtime.config.advantage_clip
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
-                                teacher_data = self.rm_wg.compute_rm_score(batch)
+                                if self.use_mopd:
+                                    # The MOPD package owns three independent, GPU-reserved
+                                    # teacher services.  It returns the same tensor field the
+                                    # existing token-OPD actor path already consumes.
+                                    prefill_ticket = self.mopd_runtime.submit_prefill(batch)
+                                    teacher_data = self.mopd_runtime.collect_prefill(prefill_ticket)
+                                else:
+                                    teacher_data = self.rm_wg.compute_rm_score(batch)
                                 batch = batch.union(teacher_data)
 
                             if top_k > 0:
@@ -2797,16 +2813,9 @@ class RayPPOTrainer:
                     max_steps_duration=self.max_steps_duration,
                     redundant_time=self.config.trainer.esi_redundant_time,
                 )
-                # Check if the conditions for saving a checkpoint are met.
-                # The conditions include a mandatory condition (1) and
-                # one of the following optional conditions (2/3/4):
-                # 1. The save frequency is set to a positive value.
-                # 2. It's the last training step.
-                # 3. The current step number is a multiple of the save frequency.
-                # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                ):
+                # save_freq is validated as positive before training. The final
+                # checkpoint is mandatory even when no periodic save is due.
+                if is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):

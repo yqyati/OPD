@@ -55,7 +55,8 @@ trainer:
   total_training_steps: null
   logger: [ 'console', 'wandb' ]
   seed: 1
-  save_freq: -1
+  # Positive save interval. The final step is always saved.
+  save_freq: 1000000000
   test_freq: -1
   max_ckpt_to_keep: null  # Maximum number of checkpoints to keep, set to null to keep all
 

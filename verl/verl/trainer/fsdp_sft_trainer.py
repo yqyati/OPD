@@ -98,6 +98,9 @@ class FSDPSFTTrainer:
         val_dataset: Dataset,
     ):
         self.config = config
+        from verl.utils.config import validate_save_frequency
+
+        validate_save_frequency(self.config.trainer.save_freq)
         self.device_mesh = device_mesh
         self.ulysses_device_mesh = ulysses_device_mesh
         self.sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
@@ -791,7 +794,7 @@ class FSDPSFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.config.trainer.save_freq > 0 and is_save_step):
+                if is_last_step or is_save_step:
                     self.save_checkpoint(step=global_step)
 
                 if is_last_step:

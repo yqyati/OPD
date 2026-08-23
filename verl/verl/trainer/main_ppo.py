@@ -93,7 +93,15 @@ def run_ppo(config, task_runner_class=None) -> None:
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()
-    ray.get(runner.run.remote(config))
+    try:
+        ray.get(runner.run.remote(config))
+    except BaseException:
+        # The TaskRunner owns the worker actors it creates.  If initialization
+        # fails (for example vLLM dies in init_device), explicitly kill the
+        # owner so child WorkerDict actors cannot outlive the failed run and
+        # retain CUDA contexts.
+        ray.kill(runner, no_restart=True)
+        raise
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
     # This file is used for performance analysis
@@ -262,7 +270,12 @@ class TaskRunner:
         # - for code related prompt, we send to a sandbox if there are test cases
         # finally, we combine all the rewards together
         # The reward type depends on the tag of the data
-        self.add_reward_model_worker(config)
+        mopd_raw = config.get("mopd", {})
+        mopd_enabled = bool(mopd_raw.get("enable", False))
+        # MOPD owns its three teacher services outside the legacy single-RM
+        # worker group.  Existing runs keep this call and are unchanged.
+        if not mopd_enabled:
+            self.add_reward_model_worker(config)
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
@@ -320,25 +333,53 @@ class TaskRunner:
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
-            config=config,
-            tokenizer=tokenizer,
-            processor=processor,
-            role_worker_mapping=self.role_worker_mapping,
-            resource_pool_manager=resource_pool_manager,
-            ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            collate_fn=collate_fn,
-            train_sampler=train_sampler,
-        )
-        # Initialize the workers of the trainer.
-        trainer.init_workers()
+        mopd_runtime = None
+        if mopd_enabled:
+            from verl.mopd.config import MOPDConfig
+            from verl.mopd.runtime import AsyncMOPDRuntime
+            from verl.single_controller.ray import RayResourcePool
 
-        # Start the training process.
-        trainer.fit()
+            if config.actor_rollout_ref.rollout.mode == "async":
+                raise ValueError("Initial MOPD integration requires synchronous student rollout; teacher prefill is asynchronous.")
+            if config.reward_model.enable:
+                raise ValueError("MOPD owns teacher scoring; set reward_model.enable=False in the MOPD launcher.")
+            mopd_config = MOPDConfig.from_mapping(OmegaConf.to_container(mopd_raw, resolve=True))
+            mopd_config.validate_training_topology(config)
+            # This is intentionally a named, separate placement group: the
+            # launcher reserves 8 GPUs total as 5 student + 3 frozen teachers.
+            teacher_pool = RayResourcePool(process_on_nodes=[3], use_gpu=True, max_colocate_count=1, name_prefix="mopd_teacher_pool")
+            teacher_placement_groups = teacher_pool.get_placement_groups(name="mopd_teacher_pool")
+            mopd_runtime = AsyncMOPDRuntime(mopd_config, placement_groups=teacher_placement_groups)
+            try:
+                print(f"MOPD teacher services ready: {mopd_runtime.healthcheck()}")
+            except BaseException:
+                mopd_runtime.close()
+                mopd_runtime = None
+                raise
+
+        try:
+            trainer = RayPPOTrainer(
+                config=config,
+                tokenizer=tokenizer,
+                processor=processor,
+                role_worker_mapping=self.role_worker_mapping,
+                resource_pool_manager=resource_pool_manager,
+                ray_worker_group_cls=ray_worker_group_cls,
+                reward_fn=reward_fn,
+                val_reward_fn=val_reward_fn,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                collate_fn=collate_fn,
+                train_sampler=train_sampler,
+                mopd_runtime=mopd_runtime,
+            )
+            # Keep initialization inside cleanup scope: vLLM/FSDP failures
+            # can occur before trainer.fit() is entered.
+            trainer.init_workers()
+            trainer.fit()
+        finally:
+            if mopd_runtime is not None:
+                mopd_runtime.close()
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, max_samples: int = -1):

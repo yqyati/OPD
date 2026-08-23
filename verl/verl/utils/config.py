@@ -17,7 +17,21 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-__all__ = ["omega_conf_to_dataclass", "validate_config"]
+__all__ = ["omega_conf_to_dataclass", "validate_config", "validate_save_frequency"]
+
+
+def validate_save_frequency(save_freq: Any) -> None:
+    """Require checkpoint saving to remain enabled.
+
+    A non-positive value used to silently disable both periodic and final PPO
+    checkpoints. Reject it before training starts so a completed run cannot
+    exit without publishing its final weights.
+    """
+    if isinstance(save_freq, bool) or not isinstance(save_freq, int) or save_freq <= 0:
+        raise ValueError(
+            "trainer.save_freq must be a positive integer; "
+            f"got {save_freq!r}. Checkpoint saving cannot be disabled."
+        )
 
 
 def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[type[Any]] = None) -> Any:
@@ -83,6 +97,8 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    validate_save_frequency(config.trainer.save_freq)
+
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

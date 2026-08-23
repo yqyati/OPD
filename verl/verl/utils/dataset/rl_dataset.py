@@ -439,7 +439,7 @@ class RLHFDataset(Dataset):
                 if not is_length_error:
                     raise
                 logger.warning(
-                    "Skipping overlong sample at index {} during __getitem__ (attempt {}/{}): {}",
+                    "Skipping overlong sample at index %s during __getitem__ (attempt %s/%s): %s",
                     current_item,
                     attempt + 1,
                     dataset_len,

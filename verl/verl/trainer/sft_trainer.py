@@ -133,6 +133,9 @@ class SFTTrainer:
         self.save_freq = self.config.trainer.save_freq
         if self.save_freq == "after_each_epoch":
             self.save_freq = self.steps_per_epoch
+        from verl.utils.config import validate_save_frequency
+
+        validate_save_frequency(self.save_freq)
 
         self.test_freq = self.config.trainer.test_freq
         if self.test_freq == "after_each_epoch":
@@ -350,7 +353,7 @@ class SFTTrainer:
                         last_valid_metric = metric
                     torch.distributed.barrier()
 
-                if is_last_step or (self.save_freq > 0 and is_save_step):
+                if is_last_step or is_save_step:
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:

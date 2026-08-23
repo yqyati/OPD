@@ -163,8 +163,8 @@ trainer:
   # Number of GPUs per node
   n_gpus_per_node: 8
 
-  # Save frequency (by iteration) for model checkpoints
-  save_freq: -1
+  # Positive save interval. The final step is always saved.
+  save_freq: 1000000000
 
   # On ENOSPC/EDQUOT, wait and retry checkpoint publication instead of losing
   # a running job. The generic OPD runner enables this explicitly.
