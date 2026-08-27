@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# TEMPLATE ONLY: copy, replace all placeholders, and remove this guard.
+set -euo pipefail
+echo "Refusing to execute an MOPD template directly." >&2
+exit 2
+
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate verl
+source /mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/OPD/.env
+
+export PYTHONPATH="${OPD_ROOT}/verl:${PYTHONPATH:-}"
+export VLLM_USE_FLASHINFER_SAMPLER=0
+cd "${OPD_ROOT}"
+
+PREFIX_DATASET=__PREFIX_DATASET__
+PREFIX_LENGTH=__PREFIX_LENGTH__
+PREFIX_SOURCE_DIR=__PREFIX_SOURCE_DIR__
+EFFECTIVE_MANIFEST=__EFFECTIVE_MANIFEST__
+TRAIN_LAUNCHER=__ABSOLUTE_TRAIN_LAUNCHER__
+EVAL_LAUNCHER=__ABSOLUTE_EVAL_LAUNCHER__
+MERGED_MODEL=__MERGED_MODEL_PATH__
+PYTHON_BIN=/root/miniconda3/envs/verl/bin/python
+
+require_hf_model() {
+  local model=$1
+  test -f "${model}/config.json" || { echo "Missing config: ${model}" >&2; return 1; }
+  compgen -G "${model}/*.safetensors" >/dev/null || { echo "Missing weights: ${model}" >&2; return 1; }
+}
+
+test -f "${TRAIN_LAUNCHER}" || { echo "Missing train launcher: ${TRAIN_LAUNCHER}" >&2; exit 1; }
+test -f "${EVAL_LAUNCHER}" || { echo "Missing eval launcher: ${EVAL_LAUNCHER}" >&2; exit 1; }
+
+echo "[prefix 1/3] Extract Prefix-${PREFIX_LENGTH} from retained 7k responses"
+test -f "${EFFECTIVE_MANIFEST}" || { echo "Missing effective 7k manifest: ${EFFECTIVE_MANIFEST}" >&2; exit 1; }
+for domain in math instruct code; do
+  test -f "${PREFIX_SOURCE_DIR}/${domain}_prompts.parquet" || { echo "Missing ${domain} prompts" >&2; exit 1; }
+  test -f "${PREFIX_SOURCE_DIR}/${domain}_full_response_7168.parquet" || { echo "Missing ${domain} 7k response" >&2; exit 1; }
+done
+
+if [[ ! -f "${PREFIX_DATASET}" ]]; then
+  for domain in math instruct code; do
+    prefix_file="${PREFIX_SOURCE_DIR}/${domain}_prefix${PREFIX_LENGTH}.parquet"
+    if [[ ! -f "${prefix_file}" ]]; then
+      "${PYTHON_BIN}" scripts/teacher_prefix/build_prefix_dataset_from_teacher_responses.py \
+        --input "${PREFIX_SOURCE_DIR}/${domain}_full_response_7168.parquet" \
+        --source "${PREFIX_SOURCE_DIR}/${domain}_prompts.parquet" \
+        --output "${prefix_file}" --prefix-length "${PREFIX_LENGTH}"
+    fi
+  done
+  PREFIX_SOURCE_DIR="${PREFIX_SOURCE_DIR}" EFFECTIVE_MANIFEST="${EFFECTIVE_MANIFEST}" PREFIX_DATASET="${PREFIX_DATASET}" PREFIX_LENGTH="${PREFIX_LENGTH}" \
+    "${PYTHON_BIN}" - <<'PY'
+import os
+from pathlib import Path
+import pyarrow as pa
+import pyarrow.parquet as pq
+src = Path(os.environ['PREFIX_SOURCE_DIR'])
+length = int(os.environ['PREFIX_LENGTH'])
+source = pq.read_table(os.environ['EFFECTIVE_MANIFEST'], columns=['mopd_domain','mopd_source_row'])
+tables = [pq.read_table(src / f'{d}_prefix{length}.parquet') for d in ('math','instruct','code')]
+merged = pa.concat_tables(tables).sort_by([('__mopd_manifest_index','ascending')]).drop(['__mopd_manifest_index'])
+if merged.num_rows != source.num_rows:
+    raise RuntimeError(f'row count changed: {merged.num_rows} != {source.num_rows}')
+for col in ('mopd_domain','mopd_source_row'):
+    if not merged[col].equals(source[col]): raise RuntimeError(f'row order differs in {col}')
+out = Path(os.environ['PREFIX_DATASET']); tmp = Path(f'{out}.writing')
+if tmp.exists(): tmp.unlink()
+pq.write_table(merged, tmp, compression='zstd'); tmp.replace(out)
+print(f'Wrote {out}: rows={merged.num_rows}')
+PY
+fi
+
+PREFIX_DATASET="${PREFIX_DATASET}" PREFIX_LENGTH="${PREFIX_LENGTH}" "${PYTHON_BIN}" - <<'PY'
+import os
+from collections import Counter
+import pyarrow.parquet as pq
+p=os.environ['PREFIX_DATASET']; n=int(os.environ['PREFIX_LENGTH'])
+rows=pq.ParquetFile(p).read(columns=['mopd_domain','teacher_prefix_token_ids','teacher_prefix_token_len','teacher_prefix_finish_reason','teacher_prefix_enable_thinking']).to_pylist()
+if len(rows) != 67836: raise RuntimeError(f'unexpected rows: {len(rows)}')
+if dict(Counter(r['mopd_domain'] for r in rows)) != {'math':17917,'instruct':24809,'code':25110}: raise RuntimeError('unexpected domain counts')
+for i,r in enumerate(rows):
+    if r['teacher_prefix_token_len'] != len(r['teacher_prefix_token_ids']) or not 0 < r['teacher_prefix_token_len'] <= n: raise RuntimeError(f'invalid prefix at {i}')
+    if r['teacher_prefix_finish_reason'] not in {'length','stop'}: raise RuntimeError(f'invalid finish reason at {i}')
+    if not r['teacher_prefix_enable_thinking']: raise RuntimeError(f'thinking disabled at {i}')
+print(f'Validated Prefix-{n}: rows=67836')
+PY
+
+echo "[prefix 2/3] Train, save final checkpoint, and merge"
+bash "${TRAIN_LAUNCHER}"
+require_hf_model "${MERGED_MODEL}"
+
+echo "[prefix 3/3] Run final evaluation"
+EVAL_TARGET=custom CUSTOM_MODEL="${MERGED_MODEL}" CUSTOM_LABEL=__EVAL_LABEL__ \
+  bash "${EVAL_LAUNCHER}"

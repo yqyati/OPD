@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# TEMPLATE ONLY: copy, replace all placeholders, and remove this guard.
+set -euo pipefail
+echo "Refusing to execute an MOPD template directly." >&2
+exit 2
+
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate verl
+source /mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/OPD/.env
+
+export PYTHONPATH="${OPD_ROOT}/verl:${PYTHONPATH:-}"
+export VLLM_USE_FLASHINFER_SAMPLER=0
+cd "${OPD_ROOT}"
+
+GENERATION_LAUNCHER=__ABSOLUTE_GENERATION_LAUNCHER__
+FULL_SFT_LAUNCHER=__ABSOLUTE_FULL_SFT_LAUNCHER__
+PLAIN_MOPD_LAUNCHER=__ABSOLUTE_PLAIN_MOPD_LAUNCHER__
+EVAL_LAUNCHER=__ABSOLUTE_EVAL_LAUNCHER__
+
+MATH_RESPONSE=__MATH_FULL_RESPONSE_PARQUET__
+INSTRUCT_RESPONSE=__INSTRUCT_FULL_RESPONSE_PARQUET__
+CODE_RESPONSE=__CODE_FULL_RESPONSE_PARQUET__
+SFT_MODEL=__SFT_MERGED_MODEL__
+FINAL_MODEL=__SFT_INIT_PLAIN_MOPD_MERGED_MODEL__
+
+require_hf_model() {
+  local model=$1
+  test -f "${model}/config.json" || { echo "Missing config: ${model}" >&2; return 1; }
+  compgen -G "${model}/*.safetensors" >/dev/null || { echo "Missing weights: ${model}" >&2; return 1; }
+}
+
+# Only external inputs and launchers belong in this preflight. The three
+# response parquets are outputs of stage 1 and must not be required here.
+for launcher in "${GENERATION_LAUNCHER}" "${FULL_SFT_LAUNCHER}" \
+                "${PLAIN_MOPD_LAUNCHER}" "${EVAL_LAUNCHER}"; do
+  test -f "${launcher}" || { echo "Missing launcher: ${launcher}" >&2; exit 1; }
+done
+
+echo "[1/4] Generate or resume full teacher rollouts"
+bash "${GENERATION_LAUNCHER}"
+for response in "${MATH_RESPONSE}" "${INSTRUCT_RESPONSE}" "${CODE_RESPONSE}"; do
+  test -f "${response}" || { echo "Generation did not produce: ${response}" >&2; exit 1; }
+done
+
+echo "[2/4] Train and merge full-response SFT"
+bash "${FULL_SFT_LAUNCHER}"
+require_hf_model "${SFT_MODEL}"
+
+echo "[3/4] Train plain MOPD from the full-SFT model, save, and merge"
+SFT_MODEL_DIR="${SFT_MODEL}" bash "${PLAIN_MOPD_LAUNCHER}"
+require_hf_model "${FINAL_MODEL}"
+
+echo "[4/4] Run final evaluation of the SFT+plain-MOPD model"
+EVAL_TARGET=custom CUSTOM_MODEL="${FINAL_MODEL}" CUSTOM_LABEL=__EVAL_LABEL__ \
+  bash "${EVAL_LAUNCHER}"
+

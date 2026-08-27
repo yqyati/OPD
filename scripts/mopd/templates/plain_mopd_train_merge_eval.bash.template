@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# TEMPLATE ONLY: copy, replace all placeholders, and remove this guard.
+set -euo pipefail
+echo "Refusing to execute an MOPD template directly." >&2
+exit 2
+
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate verl
+source /mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/OPD/.env
+
+export PYTHONPATH="${OPD_ROOT}/verl:${PYTHONPATH:-}"
+export VLLM_USE_FLASHINFER_SAMPLER=0
+cd "${OPD_ROOT}"
+
+TRAIN_LAUNCHER=__ABSOLUTE_TRAIN_LAUNCHER__
+EVAL_LAUNCHER=__ABSOLUTE_EVAL_LAUNCHER__
+MERGED_MODEL=__MERGED_MODEL_PATH__
+
+require_hf_model() {
+  local model=$1
+  test -f "${model}/config.json" || { echo "Missing config: ${model}" >&2; return 1; }
+  compgen -G "${model}/*.safetensors" >/dev/null || { echo "Missing weights: ${model}" >&2; return 1; }
+}
+
+test -f "${TRAIN_LAUNCHER}" || { echo "Missing train launcher: ${TRAIN_LAUNCHER}" >&2; exit 1; }
+test -f "${EVAL_LAUNCHER}" || { echo "Missing eval launcher: ${EVAL_LAUNCHER}" >&2; exit 1; }
+
+echo "[plain 1/2] Train, save final checkpoint, and merge"
+bash "${TRAIN_LAUNCHER}"
+require_hf_model "${MERGED_MODEL}"
+
+echo "[plain 2/2] Run final evaluation"
+EVAL_TARGET=custom CUSTOM_MODEL="${MERGED_MODEL}" CUSTOM_LABEL=__EVAL_LABEL__ \
+  bash "${EVAL_LAUNCHER}"
+
